@@ -1,4 +1,4 @@
-# SignSpeak : A Krekheds Project
+# SignSpeak : By "The Krekheds"
  
 SignSpeak is a machine learning project developed for "Bano Qabil" that aims to analyze videos and images containing sign language gestures and interpret them into English text. This project leverages computer vision and deep learning techniques to recognize and understand sign language, making it accessible to a wider audience.
 
