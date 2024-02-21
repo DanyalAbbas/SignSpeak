@@ -7,8 +7,8 @@ import itertools
 from collections import Counter
 from collections import deque
 import pyttsx3
-from pygame import mixer
 import pygame
+from pygame import mixer
 import sys
 import webbrowser
 
@@ -88,15 +88,21 @@ def text_render(font, size, text, color, bg_color=None):
         return write
 
 def start_menu(root):
+    credit_rect1 = pygame.Rect(320, 400, 120, 90)
+    credit_rect2 = pygame.Rect(500, 400, 120, 90)
+    credit_img1 = pygame.image.load("danyal.png").convert_alpha()
+    credit_img2 = pygame.image.load("hamza.png").convert_alpha()
     exit_menu = [False]
     while True:
 
         root.fill((0,0,0))
 
-        root.blit(text_render("broking.ttf", 25, "SIGNSPEAK : By The Krekheds", (255, 255, 255)), (20, 20))
-        root.blit(text_render("broking.ttf", 15, "DESCRIPTION: This program translates sign language into english language", (255, 255, 255)), (20, 45))
+        root.blit(text_render("broking.ttf", 35, "SIGNSPEAK : By The Krekheds", (255, 255, 255)), (225, 150))
+        root.blit(text_render("broking.ttf", 15, "DESCRIPTION:  This program translates sign language into english language", (255, 255, 255)), (0, 0))
+        root.blit(pygame.transform.scale(credit_img1, (150,150)), (320, 400))
+        root.blit(pygame.transform.scale(credit_img2, (150,150)), (500, 400))
 
-        create_button(root, 250, 250, 200, 100, (0,0,225), "broking.ttf", (50,50,225), "START", (0,0,0), exit_menu)
+        create_button(root, 370, 240, 200, 100, (0,0,225), "broking.ttf", (50,50,225), "START", (0,0,0), exit_menu)
         if exit_menu[0]:
             return None
 
@@ -106,9 +112,12 @@ def start_menu(root):
                 sys.exit()
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 # and also checking if the mouse button is colliding with the image rect
-                if krek.credit_rect.collidepoint(pygame.mouse.get_pos()) and pygame.mouse.get_pressed:
+                if credit_rect1.collidepoint(pygame.mouse.get_pos()) and pygame.mouse.get_pressed:
                     # then we will open my github profile using webbrowser library
                     webbrowser.open("https://github.com/DanyalAbbas")
+                if credit_rect2.collidepoint(pygame.mouse.get_pos()) and pygame.mouse.get_pressed:
+                    # then we will open my github profile using webbrowser library
+                    webbrowser.open("https://github.com/hamza-mughal1")
     
         pygame.display.flip()
 
