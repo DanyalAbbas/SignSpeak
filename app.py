@@ -9,6 +9,8 @@ from collections import deque
 import pyttsx3
 from pygame import mixer
 import pygame
+import sys
+import webbrowser
 
 import cv2 as cv
 import numpy as np
@@ -55,8 +57,63 @@ def cv2_to_pygame(cv_image):
                                               'RGB')
     return pygame_surface
 
+def create_button(root, x, y, width, height, def_color,textfont, hover_color, text, text_color, action):
+        font = pygame.font.Font(textfont, 35)
+        button_rect = pygame.Rect(x, y, width, height)
+        # using if condition to change the colour of button if the mouse is colliding with it
+        button_color = hover_color if button_rect.collidepoint(pygame.mouse.get_pos()) else def_color
 
-def main():
+        # making a button with colour we specified
+        pygame.draw.rect(root, button_color, button_rect)
+        # giving it borders
+        pygame.draw.rect(root, (0,0,0), button_rect, 2)
+
+        # rendering the button text
+        button_text = font.render(text, True, text_color)
+        text_rect = button_text.get_rect(center=button_rect.center)
+        # attaching the text onto the screen
+        root.blit(button_text, text_rect)
+
+        """checking if the button is colliding with the 
+           mouse cursor and mouse gets pressed"""
+        if button_rect.collidepoint(pygame.mouse.get_pos()) and pygame.mouse.get_pressed()[0]:
+            action[0] = True
+
+
+def text_render(font, size, text, color, bg_color=None):
+        # getting the font given in the input by using pygame function
+        f = pygame.font.Font(font, size)
+        # rendering the text using colours , text and bg colour given in input
+        write = f.render(text, True, color, bg_color)
+        return write
+
+def start_menu(root):
+    exit_menu = [False]
+    while True:
+
+        root.fill((0,0,0))
+
+        root.blit(text_render("broking.ttf", 25, "SIGNSPEAK : By The Krekheds", (255, 255, 255)), (20, 20))
+        root.blit(text_render("broking.ttf", 15, "DESCRIPTION: This program translates sign language into english language", (255, 255, 255)), (20, 45))
+
+        create_button(root, 250, 250, 200, 100, (0,0,225), "broking.ttf", (50,50,225), "START", (0,0,0), exit_menu)
+        if exit_menu[0]:
+            return None
+
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                sys.exit()
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                # and also checking if the mouse button is colliding with the image rect
+                if krek.credit_rect.collidepoint(pygame.mouse.get_pos()) and pygame.mouse.get_pressed:
+                    # then we will open my github profile using webbrowser library
+                    webbrowser.open("https://github.com/DanyalAbbas")
+    
+        pygame.display.flip()
+
+
+def main(root):
     # Argument parsing #################################################################
     args = get_args()
 
@@ -64,7 +121,6 @@ def main():
     cap_width = args.width
     cap_height = args.height
 
-    root = pygame.display.set_mode((cap_width,cap_height))
 
     use_static_image_mode = args.use_static_image_mode
     min_detection_confidence = args.min_detection_confidence
@@ -73,7 +129,7 @@ def main():
     use_brect = True
 
     # Camera preparation ###############################################################
-    cap = cv.VideoCapture(cap_device)
+    cap = cv.VideoCapture(1)
     cap.set(cv.CAP_PROP_FRAME_WIDTH, cap_width)
     cap.set(cv.CAP_PROP_FRAME_HEIGHT, cap_height)
 
@@ -119,6 +175,12 @@ def main():
     mode = 0
 
     while True:
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                sys.exit()
+
+
         fps = cvFpsCalc.get()
 
         # Process Key (ESC: end) #################################################
@@ -587,4 +649,6 @@ def draw_info(image, fps, mode, number):
 
 
 if __name__ == '__main__':
-    main()
+    root = pygame.display.set_mode((960,540))
+    start_menu(root)
+    main(root)
