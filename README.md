@@ -15,6 +15,11 @@ SignSpeak is a machine learning project developed for "Bano Qabil" that aims to 
 * MediaPipe Integration: The project leverages the MediaPipe library for robust hand and pose detection, a crucial component for sign language interpretation.
 * GUI (Graphical User Interface): The graphical user interface is implemented using the pygame library.
 
+# Snapshots
+<a href="https://ibb.co/7VSF5t3"><img src="https://i.ibb.co/QnJGRvW/3.jpg" alt="3" border="0"></a>
+<a href="https://ibb.co/y5ZTZqx"><img src="https://i.ibb.co/921X1Wd/1.jpg" alt="1" border="0"></a>
+<a href="https://ibb.co/dkWhnx6"><img src="https://i.ibb.co/SVsLqG0/2.jpg" alt="2" border="0"></a>
+
 
 <p align="center">
   Created by:
