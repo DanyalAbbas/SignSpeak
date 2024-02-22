@@ -88,21 +88,22 @@ def text_render(font, size, text, color, bg_color=None):
         return write
 
 def start_menu(root):
-    credit_rect1 = pygame.Rect(320, 400, 120, 90)
-    credit_rect2 = pygame.Rect(500, 400, 120, 90)
-    credit_img1 = pygame.image.load("danyal.png").convert_alpha()
-    credit_img2 = pygame.image.load("hamza.png").convert_alpha()
+    credit_rect1 = pygame.Rect(320, 400, 150,80)
+    credit_rect2 = pygame.Rect(500, 400, 150,80)
+    credit_img1 = pygame.image.load("Assets/danyal.png")
+    credit_img2 = pygame.image.load("Assets/hamza.png")
     exit_menu = [False]
     while True:
 
         root.fill((0,0,0))
 
-        root.blit(text_render("broking.ttf", 35, "SIGNSPEAK : By The Krekheds", (255, 255, 255)), (225, 150))
-        root.blit(text_render("broking.ttf", 15, "DESCRIPTION:  This program translates sign language into english language", (255, 255, 255)), (0, 0))
-        root.blit(pygame.transform.scale(credit_img1, (150,150)), (320, 400))
-        root.blit(pygame.transform.scale(credit_img2, (150,150)), (500, 400))
+        root.blit(text_render("Assets/heroking.ttf", 100, "SIGNSPEAK", (255, 255, 255)), (295, 80))
+        root.blit(text_render("Assets/heroking.ttf", 25, "By The Krekheds", (255, 255, 255)), (400, 210))
+        root.blit(text_render("Assets/broking.ttf", 15, "DESCRIPTION:  This program translates sign language into english language", (255, 255, 255)), (0, 0))
+        root.blit(pygame.transform.scale(credit_img1, (150,80)), (320, 400))
+        root.blit(pygame.transform.scale(credit_img2, (150,80)), (500, 400))
 
-        create_button(root, 370, 240, 200, 100, (0,0,225), "broking.ttf", (50,50,225), "START", (0,0,0), exit_menu)
+        create_button(root, 330, 270, 300, 70, (0,0,225), "Assets/broking.ttf", (50,50,225), "START", (255,255,255), exit_menu)
         if exit_menu[0]:
             return None
 
@@ -585,20 +586,6 @@ def draw_bounding_rect(use_brect, image, brect):
 
     return image
 
-def speak(text):
-    # Initialize the text-to-speech engine
-    engine = pyttsx3.init()
-    # Set properties, including volume, rate, and voice
-    engine.setProperty('volume', 0.9)  # Volume level (0.0 to 1.0)
-    engine.setProperty('rate', 150)     # Speed of speech (words per minute)
-    # You can set the voice by specifying the name of the voice. For example:
-    # engine.setProperty('voice', 'english+f3')  # English female voice
-    # Convert text to speech
-    engine.say(text)
-    # Wait for the speech to finish
-    # engine.runAndWait()
-
-# Example usage:
 
 prev = ""
 
@@ -618,7 +605,7 @@ def draw_info_text(image, brect, handedness, hand_sign_text,
     if finger_gesture_text != "":
         text=info_text.split(":")[1]
         if text != prev:
-            mixer.music.load(f"{text}.mp3")
+            mixer.music.load(f"Sounds/{text}.mp3")
             mixer.music.play()
             prev = text
         cv.putText(image, "Finger Gesture:" + finger_gesture_text, (10, 60),
@@ -659,5 +646,7 @@ def draw_info(image, fps, mode, number):
 
 if __name__ == '__main__':
     root = pygame.display.set_mode((960,540))
+    pygame.display.set_caption("SignSpeak")
+    pygame.display.set_icon(pygame.image.load("Assets/signspeak.png"))
     start_menu(root)
     main(root)
