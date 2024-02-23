@@ -6,11 +6,12 @@ import argparse
 import itertools
 from collections import Counter
 from collections import deque
-import pyttsx3
+from gtts import gTTS
 import pygame
 from pygame import mixer
 import sys
 import webbrowser
+import os
 
 import cv2 as cv
 import numpy as np
@@ -22,6 +23,18 @@ from model import PointHistoryClassifier
 
 mixer.init()
 pygame.init()
+
+with open("G:\Pythone learning\SignSpeak\model\keypoint_classifier\keypoint_classifier_label.csv", "r") as rf:
+    for pos, i in enumerate(rf.readlines()):
+        if os.path.exists(f"Sounds\{i}.mp3"):
+            continue
+        if pos == 0:
+            tts = gTTS(i, lang='en')
+            tts.save(f"Sounds\{i[3:-1]}.mp3")
+        else:
+            tts = gTTS(i, lang='en')
+            tts.save(f"Sounds\{i[:-1]}.mp3")
+
 
 
 def get_args():
