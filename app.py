@@ -24,7 +24,7 @@ from model import PointHistoryClassifier
 mixer.init()
 pygame.init()
 
-with open("G:\Pythone learning\SignSpeak\model\keypoint_classifier\keypoint_classifier_label.csv", "r") as rf:
+with open(f"{os.getcwd()}\model\keypoint_classifier\keypoint_classifier_label.csv", "r") as rf:
     for pos, i in enumerate(rf.readlines()):
         if os.path.exists(f"Sounds\{i}.mp3"):
             continue
