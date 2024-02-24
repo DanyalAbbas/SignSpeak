@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+
+# Helper Modules
 import csv
 import copy
 import argparse
@@ -8,6 +10,7 @@ import sys
 import webbrowser
 import os
 
+# Main Depending Modules
 import cv2 as cv
 import numpy as np
 import mediapipe as mp
@@ -15,11 +18,15 @@ import pygame
 from pygame import mixer
 from gtts import gTTS
 
+# Utilities Modules
 from utils import CvFpsCalc
 from model import KeyPointClassifier
 
+# Initializing Modules (mixer and pygame)
 mixer.init()
 pygame.init()
+
+# global variable for playing sound
 prev = ""
 
 def text_to_speech_handler():
