@@ -9,6 +9,7 @@ import itertools
 import sys
 import webbrowser
 import os
+import time
 
 # Main Depending Modules
 import cv2 as cv
@@ -28,18 +29,19 @@ pygame.init()
 
 # global variable for playing sound
 prev = ""
+last_time = time.time()
 
 def text_to_speech_handler():
-    with open(f"{os.getcwd()}\model\keypoint_classifier\keypoint_classifier_label.csv", "r") as rf:
+    with open(f"{os.getcwd()}/model/keypoint_classifier/keypoint_classifier_label.csv", "r") as rf:
         for pos, i in enumerate(rf.readlines()):
-            if os.path.exists(f"Sounds\{i}.mp3"):
-                continue
-            if pos == 0:
-                tts = gTTS(i, lang='en')
-                tts.save(f"Sounds\{i[3:-1]}.mp3")
+            
+            i = i.strip().replace('\ufeff', '')
+            
+            if os.path.exists(f"Sounds/{i}.mp3"):
+                pass
             else:
                 tts = gTTS(i, lang='en')
-                tts.save(f"Sounds\{i[:-1]}.mp3")
+                tts.save(f"Sounds/{i}.mp3")
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -180,7 +182,10 @@ def main(root):
     # FPS Measurement 
     cvFpsCalc = CvFpsCalc(buffer_len=10)
 
+
     while True:
+        if int(time.time()) %2==0:
+            print("PROCESSING....")
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 sys.exit()
@@ -217,6 +222,13 @@ def main(root):
 
                 # Hand sign classification
                 hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+                # print("id: ", hand_sign_id[0],"confidence score: ",hand_sign_id[1])
+                if hand_sign_id[0] == 1 and hand_sign_id[1] < 0.9:
+                    break 
+                if hand_sign_id[1] <= 0.6:
+                    break
+                # hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+                hand_sign_id = hand_sign_id[0]
                 # Drawing part
                 debug_image = draw_bounding_rect(use_brect, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
@@ -492,6 +504,7 @@ def draw_bounding_rect(use_brect, image, brect):
 
 def draw_info_text(image, brect, handedness, hand_sign_text):
     global prev
+    global last_time
     cv.rectangle(image, (brect[0], brect[1]), (brect[2], brect[1] - 22),
                  (0, 0, 0), -1)
 
@@ -503,10 +516,11 @@ def draw_info_text(image, brect, handedness, hand_sign_text):
                cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv.LINE_AA)
 
     text=info_text.split(":")[1]
-    if text != prev:
+    if text != prev or (time.time() - last_time) >= 2:
         mixer.music.load(f"Sounds/{text}.mp3")
         mixer.music.play()
         prev = text
+        last_time = time.time()
 
     return image
 
