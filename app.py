@@ -185,7 +185,8 @@ def main(root):
 
     while True:
         if int(time.time()) %2==0:
-            print("PROCESSING....")
+            # print("PROCESSING....")
+            pass
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 sys.exit()
