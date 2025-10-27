@@ -29,6 +29,15 @@ function initializeSocketConnection() {
             }
         }
     });
+
+    // Receive processed frames from server (base64 jpeg)
+    socket.on('processed_frame', (data) => {
+        if (data && data.image) {
+            const videoFeed = document.getElementById('videoFeed');
+            videoFeed.src = 'data:image/jpeg;base64,' + data.image;
+            videoFeed.style.display = 'block';
+        }
+    });
 }
 
 // UI update functions
@@ -72,24 +81,16 @@ function updateTranslation(text) {
 async function startStream() {
     if (!isStreaming) {
         try {
-            const response = await fetch('/start_stream', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            const data = await response.json();
-            if (data.status === 'success') {
-                isStreaming = true;
-                document.getElementById('videoFeed').src = '/video_feed?' + new Date().getTime();
-                updateUIState();
-            } else {
-                showError('Failed to start camera stream');
-            }
+            // request permission and start local camera capture
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            startLocalCapture(stream);
+            // notify server (keeps previous API semantics)
+            await fetch('/start_stream', { method: 'POST' });
+            isStreaming = true;
+            updateUIState();
         } catch (error) {
-            showError('Network error occurred');
-            console.error('Error:', error);
+            showError('Unable to access camera: ' + (error.message || error));
+            console.error('Error starting stream:', error);
         }
     }
 }
@@ -97,25 +98,64 @@ async function startStream() {
 async function stopStream() {
     if (isStreaming) {
         try {
-            const response = await fetch('/stop_stream', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            });
-            
-            const data = await response.json();
-            if (data.status === 'success') {
-                isStreaming = false;
-                document.getElementById('videoFeed').src = '';
-                updateUIState();
-            } else {
-                showError('Failed to stop camera stream');
-            }
+            await fetch('/stop_stream', { method: 'POST' });
+            stopLocalCapture();
+            isStreaming = false;
+            document.getElementById('videoFeed').src = '';
+            updateUIState();
         } catch (error) {
             showError('Network error occurred');
             console.error('Error:', error);
         }
+    }
+}
+
+// Local capture helpers
+let _localVideoElem = null;
+let _captureCanvas = null;
+let _captureIntervalId = null;
+
+function startLocalCapture(stream) {
+    if (!_localVideoElem) {
+        _localVideoElem = document.createElement('video');
+        _localVideoElem.setAttribute('playsinline', '');
+        _localVideoElem.muted = true;
+    }
+    _localVideoElem.srcObject = stream;
+    _localVideoElem.play();
+
+    _captureCanvas = document.createElement('canvas');
+    const ctx = _captureCanvas.getContext('2d');
+
+    _localVideoElem.onloadedmetadata = () => {
+        _captureCanvas.width = _localVideoElem.videoWidth || 640;
+        _captureCanvas.height = _localVideoElem.videoHeight || 480;
+
+        // capture at ~10 FPS
+        _captureIntervalId = setInterval(() => {
+            try {
+                ctx.drawImage(_localVideoElem, 0, 0, _captureCanvas.width, _captureCanvas.height);
+                const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.6);
+                const base64 = dataUrl.split(',')[1];
+                if (socket && socket.connected) {
+                    socket.emit('frame', { image: base64 });
+                }
+            } catch (e) {
+                console.error('capture error', e);
+            }
+        }, 100);
+    };
+}
+
+function stopLocalCapture() {
+    if (_captureIntervalId) {
+        clearInterval(_captureIntervalId);
+        _captureIntervalId = null;
+    }
+    if (_localVideoElem && _localVideoElem.srcObject) {
+        const tracks = _localVideoElem.srcObject.getTracks();
+        tracks.forEach(t => t.stop());
+        _localVideoElem.srcObject = null;
     }
 }
 

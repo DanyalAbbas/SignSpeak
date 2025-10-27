@@ -14,6 +14,7 @@ import os
 import time
 from threading import Lock
 import logging
+import base64
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -25,8 +26,6 @@ CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Global variables
-camera = None
-is_streaming = False
 prev_text = ""
 last_time = time.time()
 
@@ -50,26 +49,7 @@ with open('model/keypoint_classifier/keypoint_classifier_label.csv',
         row[0] for row in keypoint_classifier_labels
     ]
 
-def init_camera():
-    global camera
-    try:
-        if camera is None:
-            camera = cv.VideoCapture(0)
-            camera.set(cv.CAP_PROP_FRAME_WIDTH, 960)
-            camera.set(cv.CAP_PROP_FRAME_HEIGHT, 540)
-        return camera
-    except Exception as e:
-        logger.error(f"Error initializing camera: {str(e)}")
-        return None
 
-def release_camera():
-    global camera
-    try:
-        if camera is not None:
-            camera.release()
-            camera = None
-    except Exception as e:
-        logger.error(f"Error releasing camera: {str(e)}")
 
 def text_to_speech_handler():
     try:
@@ -143,59 +123,50 @@ def process_frame(frame):
         logger.error(f"Error in process_frame: {str(e)}")
         return frame
 
-def generate_frames():
-    global is_streaming
-    while is_streaming:
-        try:
-            success, frame = camera.read()
-            if not success:
-                break
-            else:
-                processed_frame = process_frame(frame)
-                ret, buffer = cv.imencode('.jpg', processed_frame)
-                if not ret:
-                    continue
-                frame_bytes = buffer.tobytes()
-                yield (b'--frame\r\n'
-                      b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        except Exception as e:
-            logger.error(f"Error in generate_frames: {str(e)}")
-            break
-
 # Flask routes
 @app.route('/')
 def index():
     return render_template('index.html')
 
+
 @app.route('/video_feed')
 def video_feed():
-    if not is_streaming:
-        return Response(status=404)
-    return Response(generate_frames(),
-                   mimetype='multipart/x-mixed-replace; boundary=frame')
+    # MJPEG streaming from server is not used on cloud deployments.
+    # Clients should capture webcam locally and send frames via Socket.IO.
+    return Response(status=404)
+
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
-    global is_streaming
-    try:
-        if init_camera():
-            is_streaming = True
-            return jsonify({'status': 'success'})
-        return jsonify({'status': 'error', 'message': 'Failed to initialize camera'})
-    except Exception as e:
-        logger.error(f"Error in start_stream: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)})
+    # For cloud deployment we don't open a local camera; client handles capture.
+    return jsonify({'status': 'success'})
+
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
-    global is_streaming
+    return jsonify({'status': 'success'})
+
+
+@socketio.on('frame')
+def handle_frame(data):
+    """Receive a base64 JPEG frame from the client, process it, and return a processed JPEG."""
     try:
-        is_streaming = False
-        release_camera()
-        return jsonify({'status': 'success'})
+        b64 = data.get('image') if isinstance(data, dict) else None
+        if not b64:
+            return
+        img_bytes = base64.b64decode(b64)
+        arr = np.frombuffer(img_bytes, dtype=np.uint8)
+        frame = cv.imdecode(arr, cv.IMREAD_COLOR)
+
+        processed = process_frame(frame)
+
+        ret, buf = cv.imencode('.jpg', processed)
+        if not ret:
+            return
+        out_b64 = base64.b64encode(buf).decode('utf-8')
+        emit('processed_frame', {'image': out_b64})
     except Exception as e:
-        logger.error(f"Error in stop_stream: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)})
+        logger.error(f"Error in frame handler: {str(e)}")
 
 # SocketIO events
 @socketio.on('connect')
@@ -204,10 +175,7 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    global is_streaming
-    if is_streaming:
-        is_streaming = False
-        release_camera()
+    logger.info('Client disconnected')
 
 # Helper functions
 def calc_bounding_rect(image, landmarks):
