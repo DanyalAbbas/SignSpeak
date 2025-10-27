@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SignSpeak - Sign Language Translator</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SignSpeak</h1>
+            <p>Real-time Sign Language Translation</p>
+        </header>
+        
+        <div class="main-content">
+            <div class="video-container">
+                <img id="videoFeed" src="{{ url_for('video_feed') }}" alt="Video stream">
+            </div>
+            <div class="translation-box">
+                <h2>Translation:</h2>
+                <p id="translationText"></p>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button id="startButton" onclick="startStream()">Start Camera</button>
+            <button id="stopButton" onclick="stopStream()">Stop Camera</button>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
