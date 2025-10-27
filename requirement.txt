@@ -74,3 +74,4 @@ eventlet==0.35.2
 dnspython==2.5.0
 greenlet==3.0.3
 gunicorn
+gtts
