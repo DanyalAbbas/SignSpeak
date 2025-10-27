@@ -4,29 +4,63 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SignSpeak - Sign Language Translator</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
 </head>
 <body>
     <div class="container">
         <header>
-            <h1>SignSpeak</h1>
-            <p>Real-time Sign Language Translation</p>
+            <div class="logo-container">
+                <img src="{{ url_for('static', filename='images/signspeak.png') }}" alt="SignSpeak Logo" class="logo">
+                <h1>SignSpeak</h1>
+            </div>
+            <p class="tagline">Breaking barriers through real-time sign language translation</p>
         </header>
         
         <div class="main-content">
-            <div class="video-container">
-                <img id="videoFeed" src="{{ url_for('video_feed') }}" alt="Video stream">
+            <div class="video-section">
+                <div class="video-container">
+                    <div class="video-overlay" id="cameraOffOverlay">
+                        <i class="fas fa-camera"></i>
+                        <p>Camera is off</p>
+                    </div>
+                    <img id="videoFeed" src="" alt="Video stream">
+                </div>
+                <div class="controls">
+                    <button id="startButton" class="btn primary" onclick="startStream()">
+                        <i class="fas fa-play"></i> Start Camera
+                    </button>
+                    <button id="stopButton" class="btn danger" onclick="stopStream()" disabled>
+                        <i class="fas fa-stop"></i> Stop Camera
+                    </button>
+                </div>
             </div>
-            <div class="translation-box">
-                <h2>Translation:</h2>
-                <p id="translationText"></p>
+            
+            <div class="info-panel">
+                <div class="translation-box">
+                    <h2><i class="fas fa-language"></i> Current Translation</h2>
+                    <div class="translation-content">
+                        <p id="translationText">No sign detected</p>
+                    </div>
+                </div>
+                
+                <div class="status-box">
+                    <div class="status-item">
+                        <i class="fas fa-circle" id="connectionStatus"></i>
+                        <span>Connection Status</span>
+                    </div>
+                    <div class="status-item">
+                        <i class="fas fa-microphone" id="audioStatus"></i>
+                        <span>Audio Status</span>
+                    </div>
+                </div>
             </div>
         </div>
         
-        <div class="controls">
-            <button id="startButton" onclick="startStream()">Start Camera</button>
-            <button id="stopButton" onclick="stopStream()">Stop Camera</button>
-        </div>
+        <footer>
+            <p>Created by DanyalAbbas • <a href="https://github.com/DanyalAbbas" target="_blank"><i class="fab fa-github"></i> GitHub</a></p>
+        </footer>
     </div>
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
 </body>

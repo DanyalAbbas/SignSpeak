@@ -1,5 +1,6 @@
 from flask import Flask, render_template, Response, jsonify, request
-from flask_socketio import SocketIO
+from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 import cv2 as cv
 import mediapipe as mp
 import numpy as np
@@ -12,11 +13,16 @@ from gtts import gTTS
 import os
 import time
 from threading import Lock
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-socketio = SocketIO(app)
-thread = None
-thread_lock = Lock()
+app.config['SECRET_KEY'] = 'signspeak2025!'
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 # Global variables
 camera = None
@@ -46,96 +52,115 @@ with open('model/keypoint_classifier/keypoint_classifier_label.csv',
 
 def init_camera():
     global camera
-    if camera is None:
-        camera = cv.VideoCapture(0)
-        camera.set(cv.CAP_PROP_FRAME_WIDTH, 960)
-        camera.set(cv.CAP_PROP_FRAME_HEIGHT, 540)
-    return camera
+    try:
+        if camera is None:
+            camera = cv.VideoCapture(0)
+            camera.set(cv.CAP_PROP_FRAME_WIDTH, 960)
+            camera.set(cv.CAP_PROP_FRAME_HEIGHT, 540)
+        return camera
+    except Exception as e:
+        logger.error(f"Error initializing camera: {str(e)}")
+        return None
 
 def release_camera():
     global camera
-    if camera is not None:
-        camera.release()
-        camera = None
+    try:
+        if camera is not None:
+            camera.release()
+            camera = None
+    except Exception as e:
+        logger.error(f"Error releasing camera: {str(e)}")
 
 def text_to_speech_handler():
-    os.makedirs('static/sounds', exist_ok=True)
-    for label in keypoint_classifier_labels:
-        if not os.path.exists(f"static/sounds/{label}.mp3"):
-            tts = gTTS(label, lang='en')
-            tts.save(f"static/sounds/{label}.mp3")
+    try:
+        os.makedirs('static/sounds', exist_ok=True)
+        for label in keypoint_classifier_labels:
+            if not os.path.exists(f"static/sounds/{label}.mp3"):
+                tts = gTTS(label, lang='en')
+                tts.save(f"static/sounds/{label}.mp3")
+    except Exception as e:
+        logger.error(f"Error in text_to_speech_handler: {str(e)}")
 
 def process_frame(frame):
     global prev_text, last_time
     
-    # Flip the frame horizontally
-    frame = cv.flip(frame, 1)
-    debug_image = copy.deepcopy(frame)
+    try:
+        # Flip the frame horizontally
+        frame = cv.flip(frame, 1)
+        debug_image = copy.deepcopy(frame)
+        
+        # Convert to RGB for MediaPipe
+        frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+        results = hands.process(frame_rgb)
+        
+        if results.multi_hand_landmarks is not None:
+            for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
+                                                results.multi_handedness):
+                # Calculate bounding box
+                brect = calc_bounding_rect(debug_image, hand_landmarks)
+                
+                # Calculate landmarks
+                landmark_list = calc_landmark_list(debug_image, hand_landmarks)
+                
+                # Preprocess landmarks
+                pre_processed_landmark_list = pre_process_landmark(landmark_list)
+                
+                # Hand sign classification
+                hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+                
+                if isinstance(hand_sign_id, tuple):
+                    if hand_sign_id[0] == 1 and hand_sign_id[1] < 0.9:
+                        continue
+                    if hand_sign_id[1] <= 0.6:
+                        continue
+                    hand_sign_id = hand_sign_id[0]
+                
+                # Draw landmarks and bounding box
+                debug_image = draw_bounding_rect(True, debug_image, brect)
+                debug_image = draw_landmarks(debug_image, landmark_list)
+                
+                # Get the translation text
+                translation = keypoint_classifier_labels[hand_sign_id]
+                debug_image = draw_info_text(debug_image, brect, handedness, translation)
+                
+                # Emit translation via WebSocket if it's different or enough time has passed
+                if translation != prev_text or (time.time() - last_time) >= 2:
+                    audio_path = f"/static/sounds/{translation}.mp3"
+                    socketio.emit('translation', {
+                        'text': translation,
+                        'audio': audio_path
+                    })
+                    prev_text = translation
+                    last_time = time.time()
+        
+        # Add FPS info
+        cvFpsCalc = CvFpsCalc(buffer_len=10)
+        debug_image = draw_info(debug_image, cvFpsCalc.get())
+        
+        return debug_image
     
-    # Convert to RGB for MediaPipe
-    frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
-    results = hands.process(frame_rgb)
-    
-    if results.multi_hand_landmarks is not None:
-        for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
-                                            results.multi_handedness):
-            # Calculate bounding box
-            brect = calc_bounding_rect(debug_image, hand_landmarks)
-            
-            # Calculate landmarks
-            landmark_list = calc_landmark_list(debug_image, hand_landmarks)
-            
-            # Preprocess landmarks
-            pre_processed_landmark_list = pre_process_landmark(landmark_list)
-            
-            # Hand sign classification
-            hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-            
-            if isinstance(hand_sign_id, tuple):
-                if hand_sign_id[0] == 1 and hand_sign_id[1] < 0.9:
-                    continue
-                if hand_sign_id[1] <= 0.6:
-                    continue
-                hand_sign_id = hand_sign_id[0]
-            
-            # Draw landmarks and bounding box
-            debug_image = draw_bounding_rect(True, debug_image, brect)
-            debug_image = draw_landmarks(debug_image, landmark_list)
-            
-            # Get the translation text
-            translation = keypoint_classifier_labels[hand_sign_id]
-            debug_image = draw_info_text(debug_image, brect, handedness, translation)
-            
-            # Emit translation via WebSocket if it's different or enough time has passed
-            if translation != prev_text or (time.time() - last_time) >= 2:
-                audio_path = f"/static/sounds/{translation}.mp3"
-                socketio.emit('translation', {
-                    'text': translation,
-                    'audio': audio_path
-                })
-                prev_text = translation
-                last_time = time.time()
-    
-    # Add FPS info
-    cvFpsCalc = CvFpsCalc(buffer_len=10)
-    debug_image = draw_info(debug_image, cvFpsCalc.get())
-    
-    return debug_image
+    except Exception as e:
+        logger.error(f"Error in process_frame: {str(e)}")
+        return frame
 
 def generate_frames():
     global is_streaming
     while is_streaming:
-        success, frame = camera.read()
-        if not success:
+        try:
+            success, frame = camera.read()
+            if not success:
+                break
+            else:
+                processed_frame = process_frame(frame)
+                ret, buffer = cv.imencode('.jpg', processed_frame)
+                if not ret:
+                    continue
+                frame_bytes = buffer.tobytes()
+                yield (b'--frame\r\n'
+                      b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except Exception as e:
+            logger.error(f"Error in generate_frames: {str(e)}")
             break
-        else:
-            processed_frame = process_frame(frame)
-            ret, buffer = cv.imencode('.jpg', processed_frame)
-            if not ret:
-                continue
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                  b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 # Flask routes
 @app.route('/')
@@ -144,23 +169,47 @@ def index():
 
 @app.route('/video_feed')
 def video_feed():
+    if not is_streaming:
+        return Response(status=404)
     return Response(generate_frames(),
                    mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
     global is_streaming
-    init_camera()
-    is_streaming = True
-    return jsonify({'status': 'success'})
+    try:
+        if init_camera():
+            is_streaming = True
+            return jsonify({'status': 'success'})
+        return jsonify({'status': 'error', 'message': 'Failed to initialize camera'})
+    except Exception as e:
+        logger.error(f"Error in start_stream: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)})
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
     global is_streaming
-    is_streaming = False
-    release_camera()
-    return jsonify({'status': 'success'})
+    try:
+        is_streaming = False
+        release_camera()
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logger.error(f"Error in stop_stream: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)})
 
+# SocketIO events
+@socketio.on('connect')
+def handle_connect():
+    emit('connection_status', {'status': 'connected'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    global is_streaming
+    if is_streaming:
+        is_streaming = False
+        release_camera()
+
+# Helper functions
 def calc_bounding_rect(image, landmarks):
     image_width, image_height = image.shape[1], image.shape[0]
     landmark_array = np.empty((0, 2), int)
@@ -193,7 +242,6 @@ def pre_process_landmark(landmark_list):
     for index, landmark_point in enumerate(temp_landmark_list):
         if index == 0:
             base_x, base_y = landmark_point[0], landmark_point[1]
-        
         temp_landmark_list[index][0] = temp_landmark_list[index][0] - base_x
         temp_landmark_list[index][1] = temp_landmark_list[index][1] - base_y
     
@@ -204,7 +252,7 @@ def pre_process_landmark(landmark_list):
     # Normalization
     max_value = max(list(map(abs, temp_landmark_list)))
     def normalize_(n):
-        return n / max_value
+        return n / max_value if max_value != 0 else 0
     
     temp_landmark_list = list(map(normalize_, temp_landmark_list))
     return temp_landmark_list
@@ -262,5 +310,7 @@ def draw_info(image, fps):
     return image
 
 if __name__ == '__main__':
+    # Initialize text-to-speech
     text_to_speech_handler()
+    # Start the Flask-SocketIO server
     socketio.run(app, host='0.0.0.0', port=5000, debug=True)

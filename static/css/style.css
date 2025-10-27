@@ -1,83 +1,278 @@
-body {
-    font-family: Arial, sans-serif;
+:root {
+    --primary-color: #4A90E2;
+    --danger-color: #E25B4A;
+    --text-color: #2C3E50;
+    --bg-color: #F5F7FA;
+    --card-bg: #FFFFFF;
+    --success-color: #2ECC71;
+    --warning-color: #F1C40F;
+}
+
+* {
     margin: 0;
     padding: 0;
-    background-color: #f0f0f0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    line-height: 1.6;
 }
 
 .container {
-    max-width: 1200px;
+    max-width: 1400px;
     margin: 0 auto;
+    padding: 20px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* Header Styles */
+header {
+    text-align: center;
+    margin-bottom: 40px;
     padding: 20px;
 }
 
-header {
-    text-align: center;
-    margin-bottom: 30px;
-}
-
-header h1 {
-    color: #333;
-    font-size: 2.5em;
+.logo-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
     margin-bottom: 10px;
 }
 
+.logo {
+    width: 60px;
+    height: 60px;
+    object-fit: contain;
+}
+
+header h1 {
+    font-size: 3em;
+    color: var(--primary-color);
+    margin: 0;
+}
+
+.tagline {
+    font-size: 1.2em;
+    color: #666;
+    margin-top: 10px;
+}
+
+/* Main Content Styles */
 .main-content {
+    display: grid;
+    grid-template-columns: 2fr 1fr;
+    gap: 30px;
+    margin-bottom: 40px;
+    flex-grow: 1;
+}
+
+.video-section {
     display: flex;
+    flex-direction: column;
     gap: 20px;
-    margin-bottom: 20px;
 }
 
 .video-container {
-    flex: 2;
+    position: relative;
     background-color: #000;
-    border-radius: 10px;
+    border-radius: 15px;
     overflow: hidden;
+    aspect-ratio: 16/9;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.video-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.8);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-size: 1.5em;
+}
+
+.video-overlay i {
+    font-size: 3em;
+    margin-bottom: 15px;
 }
 
 #videoFeed {
     width: 100%;
-    height: auto;
-    display: block;
+    height: 100%;
+    object-fit: cover;
+    display: none;
 }
 
-.translation-box {
-    flex: 1;
-    background-color: white;
-    padding: 20px;
-    border-radius: 10px;
-    box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+/* Info Panel Styles */
+.info-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.translation-box, .status-box {
+    background-color: var(--card-bg);
+    border-radius: 15px;
+    padding: 25px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 
 .translation-box h2 {
-    margin-top: 0;
-    color: #333;
+    color: var(--primary-color);
+    margin-bottom: 15px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
 }
 
-.controls {
+.translation-content {
+    min-height: 100px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2em;
     text-align: center;
+    color: var(--text-color);
 }
 
-button {
-    padding: 10px 20px;
-    margin: 0 10px;
-    font-size: 1em;
+.status-box {
+    display: flex;
+    justify-content: space-around;
+}
+
+.status-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.status-item i {
+    font-size: 1.2em;
+}
+
+/* Button Styles */
+.controls {
+    display: flex;
+    justify-content: center;
+    gap: 15px;
+}
+
+.btn {
+    padding: 12px 24px;
+    font-size: 1.1em;
     border: none;
-    border-radius: 5px;
+    border-radius: 8px;
     cursor: pointer;
-    background-color: #007bff;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.3s ease;
+    font-weight: 500;
+}
+
+.btn i {
+    font-size: 1.1em;
+}
+
+.btn.primary {
+    background-color: var(--primary-color);
     color: white;
-    transition: background-color 0.3s;
 }
 
-button:hover {
-    background-color: #0056b3;
+.btn.primary:hover {
+    background-color: #357ABD;
 }
 
-#stopButton {
-    background-color: #dc3545;
+.btn.danger {
+    background-color: var(--danger-color);
+    color: white;
 }
 
-#stopButton:hover {
-    background-color: #c82333;
+.btn.danger:hover {
+    background-color: #C04132;
+}
+
+.btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+/* Footer Styles */
+footer {
+    text-align: center;
+    padding: 20px;
+    margin-top: auto;
+}
+
+footer a {
+    color: var(--primary-color);
+    text-decoration: none;
+    transition: color 0.3s;
+}
+
+footer a:hover {
+    color: #357ABD;
+}
+
+/* Status Indicators */
+#connectionStatus.connected {
+    color: var(--success-color);
+}
+
+#connectionStatus.disconnected {
+    color: var(--danger-color);
+}
+
+#audioStatus.active {
+    color: var(--success-color);
+}
+
+#audioStatus.muted {
+    color: var(--warning-color);
+}
+
+/* Responsive Design */
+@media (max-width: 1024px) {
+    .main-content {
+        grid-template-columns: 1fr;
+    }
+    
+    .video-container {
+        aspect-ratio: 4/3;
+    }
+}
+
+@media (max-width: 768px) {
+    .container {
+        padding: 10px;
+    }
+    
+    header h1 {
+        font-size: 2em;
+    }
+    
+    .tagline {
+        font-size: 1em;
+    }
+    
+    .status-box {
+        flex-direction: column;
+        gap: 15px;
+    }
+    
+    .btn {
+        padding: 10px 20px;
+        font-size: 1em;
+    }
 }
