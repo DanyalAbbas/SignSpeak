@@ -9,7 +9,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Socket connection and handlers
 function initializeSocketConnection() {
-    socket = io();
+    socket = io({
+        transports: ['websocket', 'polling'],
+    });
     
     socket.on('connect', () => {
         updateConnectionStatus(true);

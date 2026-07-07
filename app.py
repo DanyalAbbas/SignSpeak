@@ -1,3 +1,6 @@
+import eventlet
+eventlet.monkey_patch()
+
 from flask import Flask, render_template, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -124,6 +127,12 @@ def process_frame(frame):
         return frame
 
 # Flask routes
+@app.after_request
+def add_camera_headers(response):
+    response.headers['Permissions-Policy'] = 'camera=*, microphone=()'
+    response.headers['Cross-Origin-Opener-Policy'] = 'same-origin-allow-popups'
+    return response
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -277,9 +286,10 @@ def draw_info(image, fps):
                1.0, (255, 255, 255), 2, cv.LINE_AA)
     return image
 
+# Run TTS generation at module level (for gunicorn)
+text_to_speech_handler()
+
 if __name__ == '__main__':
-    # Initialize text-to-speech
-    text_to_speech_handler()
     # Start the Flask-SocketIO server
     port = int(os.environ.get("PORT", 5000))
-    socketio.run(app, host='0.0.0.0', port=port, debug=True)
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
