@@ -138,6 +138,15 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'service': 'SignSpeak',
+        'timestamp': time.time()
+    })
+
+
 @app.route('/video_feed')
 def video_feed():
     # MJPEG streaming from server is not used on cloud deployments.
