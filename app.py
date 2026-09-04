@@ -14,21 +14,27 @@ from threading import Lock, Thread
 import logging
 import base64
 
-# Keep MediaPipe/matplotlib off the gunicorn critical path and avoid font-cache races
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib')
 os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'signspeak2025!'
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 CORS(app)
-# threading avoids eventlet monkey_patch conflicts with TensorFlow/MediaPipe
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Global variables
+# Larger buffer so JPEG frames aren't silently dropped by Engine.IO
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="threading",
+    max_http_buffer_size=10 * 1024 * 1024,
+    ping_timeout=60,
+    ping_interval=25,
+)
+
 prev_text = ""
 last_time = time.time()
 fps_calc = CvFpsCalc(buffer_len=10)
@@ -40,30 +46,39 @@ _keypoint_classifier = None
 _models_ready = False
 _models_error = None
 _models_loading = False
+_load_started_at = 0.0
 
-# Minimum confidence to accept a sign prediction
-MIN_SIGN_CONFIDENCE = 0.55
-# "thank you" (index 1) historically needed a higher bar
-MIN_THANK_YOU_CONFIDENCE = 0.75
+MIN_SIGN_CONFIDENCE = 0.50
+MIN_THANK_YOU_CONFIDENCE = 0.70
+LOAD_STALE_SECONDS = 180
 
 with open('model/keypoint_classifier/keypoint_classifier_label.csv',
           encoding='utf-8-sig') as f:
     keypoint_classifier_labels = [row[0] for row in csv.reader(f)]
 
 
-def load_models():
-    """Load MediaPipe + TFLite lazily so gunicorn can bind the port first."""
-    global _hands, _keypoint_classifier, _models_ready, _models_error, _models_loading
+def load_models(force=False):
+    """Load MediaPipe + TFLite. Safe to call from any thread."""
+    global _hands, _keypoint_classifier, _models_ready, _models_error
+    global _models_loading, _load_started_at
 
     with _models_lock:
-        if _models_ready:
+        if _models_ready and not force:
             return True
-        if _models_loading:
+
+        # Recover if a previous background load hung / died mid-way
+        if (
+            _models_loading
+            and not force
+            and _load_started_at
+            and (time.time() - _load_started_at) < LOAD_STALE_SECONDS
+        ):
             return False
+
         _models_loading = True
+        _load_started_at = time.time()
         _models_error = None
 
-    # Heavy imports happen OUTSIDE the lock so request threads stay responsive
     try:
         logger.info('Loading MediaPipe and sign classifier...')
         import mediapipe as mp
@@ -75,7 +90,6 @@ def load_models():
                 'Pin mediapipe==0.10.21 in requirements.txt'
             )
 
-        # static_image_mode=True: each Socket.IO JPEG is independent
         hands = mp.solutions.hands.Hands(
             static_image_mode=True,
             max_num_hands=1,
@@ -97,7 +111,8 @@ def load_models():
         with _models_lock:
             _models_error = str(e)
             _models_loading = False
-        logger.error(f'Failed to load models: {e}')
+            _models_ready = False
+        logger.exception('Failed to load models')
         return False
 
 
@@ -105,11 +120,25 @@ def text_to_speech_handler():
     try:
         os.makedirs('static/sounds', exist_ok=True)
         for label in keypoint_classifier_labels:
-            if not os.path.exists(f"static/sounds/{label}.mp3"):
+            path = f"static/sounds/{label}.mp3"
+            if not os.path.exists(path):
                 tts = gTTS(label, lang='en')
-                tts.save(f"static/sounds/{label}.mp3")
+                tts.save(path)
     except Exception as e:
         logger.error(f"Error in text_to_speech_handler: {str(e)}")
+
+
+def decode_image_b64(b64):
+    img_bytes = base64.b64decode(b64)
+    arr = np.frombuffer(img_bytes, dtype=np.uint8)
+    return cv.imdecode(arr, cv.IMREAD_COLOR)
+
+
+def encode_image_b64(frame, quality=70):
+    ret, buf = cv.imencode('.jpg', frame, [int(cv.IMWRITE_JPEG_QUALITY), quality])
+    if not ret:
+        return None
+    return base64.b64encode(buf).decode('utf-8')
 
 
 def process_frame(frame):
@@ -117,9 +146,14 @@ def process_frame(frame):
 
     try:
         if not _models_ready and not load_models():
-            return frame
+            return frame, None
 
-        # Flip for selfie-style coordinates (matches how the model was used locally)
+        # Keep inference snappy on Render CPU
+        h, w = frame.shape[:2]
+        if w > 480:
+            scale = 480.0 / w
+            frame = cv.resize(frame, (480, int(h * scale)))
+
         frame = cv.flip(frame, 1)
         debug_image = copy.deepcopy(frame)
 
@@ -127,6 +161,9 @@ def process_frame(frame):
         frame_rgb.flags.writeable = False
         results = _hands.process(frame_rgb)
         frame_rgb.flags.writeable = True
+
+        translation = None
+        confidence = None
 
         if results.multi_hand_landmarks is not None:
             for hand_landmarks, handedness in zip(
@@ -136,7 +173,6 @@ def process_frame(frame):
                 landmark_list = calc_landmark_list(debug_image, hand_landmarks)
                 pre_processed_landmark_list = pre_process_landmark(landmark_list)
 
-                # Always draw hand landmarks so the user sees detection is alive
                 debug_image = draw_bounding_rect(True, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
 
@@ -146,35 +182,25 @@ def process_frame(frame):
                 else:
                     sign_id, confidence = prediction, 1.0
 
-                translation = ""
+                label = ""
                 accepted = confidence >= MIN_SIGN_CONFIDENCE
                 if accepted and sign_id == 1 and confidence < MIN_THANK_YOU_CONFIDENCE:
                     accepted = False
 
                 if accepted and 0 <= sign_id < len(keypoint_classifier_labels):
-                    translation = keypoint_classifier_labels[sign_id]
+                    label = keypoint_classifier_labels[sign_id]
+                    translation = label
 
                 debug_image = draw_info_text(
-                    debug_image, brect, handedness, translation or f"{confidence:.0%}"
+                    debug_image,
+                    brect,
+                    handedness,
+                    label or f"{confidence:.0%}",
                 )
 
                 if translation and (
-                    translation != prev_text or (time.time() - last_time) >= 2
+                    translation != prev_text or (time.time() - last_time) >= 1.5
                 ):
-                    audio_path = f"/static/sounds/{translation}.mp3"
-                    # Prefer the connected client; fall back to broadcast
-                    try:
-                        emit('translation', {
-                            'text': translation,
-                            'audio': audio_path,
-                            'confidence': float(confidence),
-                        })
-                    except Exception:
-                        socketio.emit('translation', {
-                            'text': translation,
-                            'audio': audio_path,
-                            'confidence': float(confidence),
-                        })
                     prev_text = translation
                     last_time = time.time()
                     logger.info(
@@ -182,11 +208,13 @@ def process_frame(frame):
                     )
 
         debug_image = draw_info(debug_image, fps_calc.get())
-        return debug_image
+        return debug_image, (
+            {'text': translation, 'confidence': confidence} if translation else None
+        )
 
     except Exception as e:
         logger.error(f"Error in process_frame: {str(e)}")
-        return frame if frame is not None else None
+        return (frame if frame is not None else None), None
 
 
 @app.after_request
@@ -210,7 +238,7 @@ def health():
         'models_loading': _models_loading,
         'models_error': _models_error,
         'labels': keypoint_classifier_labels,
-        'timestamp': time.time()
+        'timestamp': time.time(),
     })
 
 
@@ -221,7 +249,7 @@ def video_feed():
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
-    if not _models_ready and not _models_loading:
+    if not _models_ready:
         Thread(target=load_models, daemon=True).start()
     return jsonify({
         'status': 'success',
@@ -236,10 +264,61 @@ def stop_stream():
     return jsonify({'status': 'success'})
 
 
+@app.route('/api/process_frame', methods=['POST'])
+def api_process_frame():
+    """HTTP fallback for Cloudflare / proxies that break Socket.IO binary-ish traffic."""
+    data = request.get_json(silent=True) or {}
+    b64 = data.get('image')
+    if not b64:
+        return jsonify({'error': 'missing image'}), 400
+
+    if not _inference_lock.acquire(blocking=False):
+        return jsonify({
+            'busy': True,
+            'models_ready': _models_ready,
+        }), 429
+
+    try:
+        frame = decode_image_b64(b64)
+        if frame is None:
+            return jsonify({'error': 'invalid image'}), 400
+
+        if not _models_ready:
+            Thread(target=load_models, daemon=True).start()
+            out_b64 = encode_image_b64(frame)
+            return jsonify({
+                'image': out_b64,
+                'models_ready': False,
+                'translation': None,
+            })
+
+        processed, prediction = process_frame(frame)
+        if processed is None:
+            processed = frame
+
+        out_b64 = encode_image_b64(processed)
+        payload = {
+            'image': out_b64,
+            'models_ready': True,
+            'translation': None,
+        }
+        if prediction and prediction.get('text'):
+            text = prediction['text']
+            payload['translation'] = {
+                'text': text,
+                'audio': f'/static/sounds/{text}.mp3',
+                'confidence': prediction.get('confidence'),
+            }
+        return jsonify(payload)
+    except Exception as e:
+        logger.exception('api_process_frame failed')
+        return jsonify({'error': str(e)}), 500
+    finally:
+        _inference_lock.release()
+
+
 @socketio.on('frame')
 def handle_frame(data):
-    """Receive a base64 JPEG frame from the client, process it, and return a processed JPEG."""
-    # MediaPipe Hands is not thread-safe; drop overlapping frames under gthread
     if not _inference_lock.acquire(blocking=False):
         return
 
@@ -248,33 +327,33 @@ def handle_frame(data):
         if not b64:
             return
 
-        img_bytes = base64.b64decode(b64)
-        arr = np.frombuffer(img_bytes, dtype=np.uint8)
-        frame = cv.imdecode(arr, cv.IMREAD_COLOR)
+        frame = decode_image_b64(b64)
         if frame is None:
             logger.warning('Failed to decode frame from client')
             return
 
         if not _models_ready:
-            # Echo raw frame while models warm up; client keeps a local preview too
-            ret, buf = cv.imencode('.jpg', frame, [int(cv.IMWRITE_JPEG_QUALITY), 70])
-            if ret:
-                emit('processed_frame', {
-                    'image': base64.b64encode(buf).decode('utf-8'),
-                    'models_ready': False,
-                })
+            out_b64 = encode_image_b64(frame)
+            if out_b64:
+                emit('processed_frame', {'image': out_b64, 'models_ready': False})
             return
 
-        processed = process_frame(frame)
+        processed, prediction = process_frame(frame)
         if processed is None:
             processed = frame
 
-        ret, buf = cv.imencode('.jpg', processed, [int(cv.IMWRITE_JPEG_QUALITY), 70])
-        if not ret:
+        out_b64 = encode_image_b64(processed)
+        if not out_b64:
             return
 
-        out_b64 = base64.b64encode(buf).decode('utf-8')
         emit('processed_frame', {'image': out_b64, 'models_ready': True})
+        if prediction and prediction.get('text'):
+            text = prediction['text']
+            emit('translation', {
+                'text': text,
+                'audio': f'/static/sounds/{text}.mp3',
+                'confidence': float(prediction['confidence'] or 0),
+            })
     except Exception as e:
         logger.error(f"Error in frame handler: {str(e)}")
     finally:
@@ -283,7 +362,10 @@ def handle_frame(data):
 
 @socketio.on('connect')
 def handle_connect():
-    emit('connection_status', {'status': 'connected'})
+    emit('connection_status', {
+        'status': 'connected',
+        'models_ready': _models_ready,
+    })
 
 
 @socketio.on('disconnect')
@@ -298,8 +380,9 @@ def calc_bounding_rect(image, landmarks):
     for _, landmark in enumerate(landmarks.landmark):
         landmark_x = min(int(landmark.x * image_width), image_width - 1)
         landmark_y = min(int(landmark.y * image_height), image_height - 1)
-        landmark_point = [np.array((landmark_x, landmark_y))]
-        landmark_array = np.append(landmark_array, landmark_point, axis=0)
+        landmark_array = np.append(
+            landmark_array, [np.array((landmark_x, landmark_y))], axis=0
+        )
 
     x, y, w, h = cv.boundingRect(landmark_array)
     return [x, y, x + w, y + h]
@@ -324,18 +407,13 @@ def pre_process_landmark(landmark_list):
     for index, landmark_point in enumerate(temp_landmark_list):
         if index == 0:
             base_x, base_y = landmark_point[0], landmark_point[1]
-        temp_landmark_list[index][0] = temp_landmark_list[index][0] - base_x
-        temp_landmark_list[index][1] = temp_landmark_list[index][1] - base_y
+        temp_landmark_list[index][0] -= base_x
+        temp_landmark_list[index][1] -= base_y
 
     temp_landmark_list = list(itertools.chain.from_iterable(temp_landmark_list))
+    max_value = max(list(map(abs, temp_landmark_list))) or 1
 
-    max_value = max(list(map(abs, temp_landmark_list)))
-
-    def normalize_(n):
-        return n / max_value if max_value != 0 else 0
-
-    temp_landmark_list = list(map(normalize_, temp_landmark_list))
-    return temp_landmark_list
+    return [n / max_value for n in temp_landmark_list]
 
 
 def draw_landmarks(image, landmark_point):
@@ -347,14 +425,14 @@ def draw_landmarks(image, landmark_point):
             (13, 14), (14, 15), (15, 16),
             (17, 18), (18, 19), (19, 20),
             (0, 1), (1, 2), (2, 5), (5, 9),
-            (9, 13), (13, 17), (17, 0)
+            (9, 13), (13, 17), (17, 0),
         ]
 
-        for connection in connections:
-            cv.line(image, tuple(landmark_point[connection[0]]),
-                    tuple(landmark_point[connection[1]]), (255, 255, 255), 2)
-            cv.line(image, tuple(landmark_point[connection[0]]),
-                    tuple(landmark_point[connection[1]]), (0, 0, 0), 1)
+        for a, b in connections:
+            cv.line(image, tuple(landmark_point[a]), tuple(landmark_point[b]),
+                    (255, 255, 255), 2)
+            cv.line(image, tuple(landmark_point[a]), tuple(landmark_point[b]),
+                    (0, 0, 0), 1)
 
         for index, point in enumerate(landmark_point):
             radius = 8 if index in [4, 8, 12, 16, 20] else 5
@@ -380,7 +458,6 @@ def draw_info_text(image, brect, handedness, hand_sign_text):
         info_text = info_text + ':' + hand_sign_text
     cv.putText(image, info_text, (brect[0] + 5, brect[1] - 4),
                cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv.LINE_AA)
-
     return image
 
 
@@ -392,7 +469,6 @@ def draw_info(image, fps):
     return image
 
 
-# Lightweight startup only — do not block gunicorn port binding with TF/MediaPipe
 Thread(target=text_to_speech_handler, daemon=True).start()
 Thread(target=load_models, daemon=True).start()
 
