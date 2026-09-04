@@ -1,17 +1,21 @@
+# Import ML / C-extension libs BEFORE eventlet monkey_patch.
+# Eventlet replaces queue.Queue with a green version that is not
+# subscriptable, which breaks MediaPipe's type annotations on import.
+import cv2 as cv
+import mediapipe as mp
+import numpy as np
+from model import KeyPointClassifier
+from utils import CvFpsCalc
+
 import eventlet
 eventlet.monkey_patch()
 
 from flask import Flask, render_template, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
-import cv2 as cv
-import mediapipe as mp
-import numpy as np
 import csv
 import copy
 import itertools
-from model import KeyPointClassifier
-from utils import CvFpsCalc
 from gtts import gTTS
 import os
 import time
@@ -26,7 +30,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'signspeak2025!'
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
 
 # Global variables
 prev_text = ""
