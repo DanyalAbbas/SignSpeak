@@ -31,6 +31,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 # Global variables
 prev_text = ""
 last_time = time.time()
+fps_calc = CvFpsCalc(buffer_len=10)
 
 # Load the hand tracking model
 mp_hands = mp.solutions.hands
@@ -116,15 +117,14 @@ def process_frame(frame):
                     prev_text = translation
                     last_time = time.time()
         
-        # Add FPS info
-        cvFpsCalc = CvFpsCalc(buffer_len=10)
-        debug_image = draw_info(debug_image, cvFpsCalc.get())
-        
+        # Add FPS info (reuse one calculator across frames)
+        debug_image = draw_info(debug_image, fps_calc.get())
+
         return debug_image
-    
+
     except Exception as e:
         logger.error(f"Error in process_frame: {str(e)}")
-        return frame
+        return frame if frame is not None else None
 
 # Flask routes
 @app.after_request
@@ -172,15 +172,22 @@ def handle_frame(data):
         b64 = data.get('image') if isinstance(data, dict) else None
         if not b64:
             return
+
         img_bytes = base64.b64decode(b64)
         arr = np.frombuffer(img_bytes, dtype=np.uint8)
         frame = cv.imdecode(arr, cv.IMREAD_COLOR)
+        if frame is None:
+            logger.warning('Failed to decode frame from client')
+            return
 
         processed = process_frame(frame)
+        if processed is None:
+            processed = frame
 
-        ret, buf = cv.imencode('.jpg', processed)
+        ret, buf = cv.imencode('.jpg', processed, [int(cv.IMWRITE_JPEG_QUALITY), 70])
         if not ret:
             return
+
         out_b64 = base64.b64encode(buf).decode('utf-8')
         emit('processed_frame', {'image': out_b64})
     except Exception as e:

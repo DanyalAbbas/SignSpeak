@@ -107,11 +107,25 @@ header h1 {
     margin-bottom: 15px;
 }
 
+#localVideo,
 #videoFeed {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: none;
+    background: #000;
+}
+
+#localVideo {
+    transform: scaleX(-1);
+    position: absolute;
+    inset: 0;
+}
+
+#videoFeed {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
 }
 
 /* Info Panel Styles */
