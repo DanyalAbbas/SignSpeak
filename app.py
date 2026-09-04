@@ -14,6 +14,10 @@ from threading import Lock, Thread
 import logging
 import base64
 
+# Keep MediaPipe/matplotlib off the gunicorn critical path and avoid font-cache races
+os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib')
+os.environ.setdefault('TF_CPP_MIN_LOG_LEVEL', '2')
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,10 +34,17 @@ last_time = time.time()
 fps_calc = CvFpsCalc(buffer_len=10)
 
 _models_lock = Lock()
+_inference_lock = Lock()
 _hands = None
 _keypoint_classifier = None
 _models_ready = False
 _models_error = None
+_models_loading = False
+
+# Minimum confidence to accept a sign prediction
+MIN_SIGN_CONFIDENCE = 0.55
+# "thank you" (index 1) historically needed a higher bar
+MIN_THANK_YOU_CONFIDENCE = 0.75
 
 with open('model/keypoint_classifier/keypoint_classifier_label.csv',
           encoding='utf-8-sig') as f:
@@ -42,39 +53,52 @@ with open('model/keypoint_classifier/keypoint_classifier_label.csv',
 
 def load_models():
     """Load MediaPipe + TFLite lazily so gunicorn can bind the port first."""
-    global _hands, _keypoint_classifier, _models_ready, _models_error
+    global _hands, _keypoint_classifier, _models_ready, _models_error, _models_loading
 
     with _models_lock:
         if _models_ready:
             return True
-        if _models_error is not None:
+        if _models_loading:
             return False
+        _models_loading = True
+        _models_error = None
 
-        try:
-            logger.info('Loading MediaPipe and sign classifier...')
-            import mediapipe as mp
-            from model import KeyPointClassifier
+    # Heavy imports happen OUTSIDE the lock so request threads stay responsive
+    try:
+        logger.info('Loading MediaPipe and sign classifier...')
+        import mediapipe as mp
+        from model import KeyPointClassifier
 
-            if not hasattr(mp, 'solutions'):
-                raise RuntimeError(
-                    'Installed mediapipe has no solutions API. '
-                    'Pin mediapipe==0.10.21 in requirements.txt'
-                )
-
-            _hands = mp.solutions.hands.Hands(
-                static_image_mode=False,
-                max_num_hands=1,
-                min_detection_confidence=0.7,
-                min_tracking_confidence=0.5,
+        if not hasattr(mp, 'solutions'):
+            raise RuntimeError(
+                'Installed mediapipe has no solutions API. '
+                'Pin mediapipe==0.10.21 in requirements.txt'
             )
-            _keypoint_classifier = KeyPointClassifier()
+
+        # static_image_mode=True: each Socket.IO JPEG is independent
+        hands = mp.solutions.hands.Hands(
+            static_image_mode=True,
+            max_num_hands=1,
+            min_detection_confidence=0.5,
+            min_tracking_confidence=0.5,
+        )
+        classifier = KeyPointClassifier()
+
+        with _models_lock:
+            _hands = hands
+            _keypoint_classifier = classifier
             _models_ready = True
-            logger.info('Models loaded successfully')
-            return True
-        except Exception as e:
+            _models_error = None
+            _models_loading = False
+
+        logger.info('Models loaded successfully')
+        return True
+    except Exception as e:
+        with _models_lock:
             _models_error = str(e)
-            logger.error(f'Failed to load models: {e}')
-            return False
+            _models_loading = False
+        logger.error(f'Failed to load models: {e}')
+        return False
 
 
 def text_to_speech_handler():
@@ -92,47 +116,70 @@ def process_frame(frame):
     global prev_text, last_time
 
     try:
-        if not load_models():
+        if not _models_ready and not load_models():
             return frame
 
-        # Flip the frame horizontally
+        # Flip for selfie-style coordinates (matches how the model was used locally)
         frame = cv.flip(frame, 1)
         debug_image = copy.deepcopy(frame)
 
-        # Convert to RGB for MediaPipe
         frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+        frame_rgb.flags.writeable = False
         results = _hands.process(frame_rgb)
+        frame_rgb.flags.writeable = True
 
         if results.multi_hand_landmarks is not None:
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
-                                                results.multi_handedness):
+            for hand_landmarks, handedness in zip(
+                results.multi_hand_landmarks, results.multi_handedness
+            ):
                 brect = calc_bounding_rect(debug_image, hand_landmarks)
                 landmark_list = calc_landmark_list(debug_image, hand_landmarks)
                 pre_processed_landmark_list = pre_process_landmark(landmark_list)
 
-                hand_sign_id = _keypoint_classifier(pre_processed_landmark_list)
-
-                if isinstance(hand_sign_id, tuple):
-                    if hand_sign_id[0] == 1 and hand_sign_id[1] < 0.9:
-                        continue
-                    if hand_sign_id[1] <= 0.6:
-                        continue
-                    hand_sign_id = hand_sign_id[0]
-
+                # Always draw hand landmarks so the user sees detection is alive
                 debug_image = draw_bounding_rect(True, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
 
-                translation = keypoint_classifier_labels[hand_sign_id]
-                debug_image = draw_info_text(debug_image, brect, handedness, translation)
+                prediction = _keypoint_classifier(pre_processed_landmark_list)
+                if isinstance(prediction, tuple):
+                    sign_id, confidence = prediction
+                else:
+                    sign_id, confidence = prediction, 1.0
 
-                if translation != prev_text or (time.time() - last_time) >= 2:
+                translation = ""
+                accepted = confidence >= MIN_SIGN_CONFIDENCE
+                if accepted and sign_id == 1 and confidence < MIN_THANK_YOU_CONFIDENCE:
+                    accepted = False
+
+                if accepted and 0 <= sign_id < len(keypoint_classifier_labels):
+                    translation = keypoint_classifier_labels[sign_id]
+
+                debug_image = draw_info_text(
+                    debug_image, brect, handedness, translation or f"{confidence:.0%}"
+                )
+
+                if translation and (
+                    translation != prev_text or (time.time() - last_time) >= 2
+                ):
                     audio_path = f"/static/sounds/{translation}.mp3"
-                    socketio.emit('translation', {
-                        'text': translation,
-                        'audio': audio_path
-                    })
+                    # Prefer the connected client; fall back to broadcast
+                    try:
+                        emit('translation', {
+                            'text': translation,
+                            'audio': audio_path,
+                            'confidence': float(confidence),
+                        })
+                    except Exception:
+                        socketio.emit('translation', {
+                            'text': translation,
+                            'audio': audio_path,
+                            'confidence': float(confidence),
+                        })
                     prev_text = translation
                     last_time = time.time()
+                    logger.info(
+                        'Predicted sign=%s confidence=%.2f', translation, confidence
+                    )
 
         debug_image = draw_info(debug_image, fps_calc.get())
         return debug_image
@@ -160,7 +207,9 @@ def health():
         'status': 'ok',
         'service': 'SignSpeak',
         'models_ready': _models_ready,
+        'models_loading': _models_loading,
         'models_error': _models_error,
+        'labels': keypoint_classifier_labels,
         'timestamp': time.time()
     })
 
@@ -172,8 +221,14 @@ def video_feed():
 
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
-    Thread(target=load_models, daemon=True).start()
-    return jsonify({'status': 'success', 'models_ready': _models_ready})
+    if not _models_ready and not _models_loading:
+        Thread(target=load_models, daemon=True).start()
+    return jsonify({
+        'status': 'success',
+        'models_ready': _models_ready,
+        'models_loading': _models_loading,
+        'models_error': _models_error,
+    })
 
 
 @app.route('/stop_stream', methods=['POST'])
@@ -184,6 +239,10 @@ def stop_stream():
 @socketio.on('frame')
 def handle_frame(data):
     """Receive a base64 JPEG frame from the client, process it, and return a processed JPEG."""
+    # MediaPipe Hands is not thread-safe; drop overlapping frames under gthread
+    if not _inference_lock.acquire(blocking=False):
+        return
+
     try:
         b64 = data.get('image') if isinstance(data, dict) else None
         if not b64:
@@ -196,6 +255,16 @@ def handle_frame(data):
             logger.warning('Failed to decode frame from client')
             return
 
+        if not _models_ready:
+            # Echo raw frame while models warm up; client keeps a local preview too
+            ret, buf = cv.imencode('.jpg', frame, [int(cv.IMWRITE_JPEG_QUALITY), 70])
+            if ret:
+                emit('processed_frame', {
+                    'image': base64.b64encode(buf).decode('utf-8'),
+                    'models_ready': False,
+                })
+            return
+
         processed = process_frame(frame)
         if processed is None:
             processed = frame
@@ -205,9 +274,11 @@ def handle_frame(data):
             return
 
         out_b64 = base64.b64encode(buf).decode('utf-8')
-        emit('processed_frame', {'image': out_b64})
+        emit('processed_frame', {'image': out_b64, 'models_ready': True})
     except Exception as e:
         logger.error(f"Error in frame handler: {str(e)}")
+    finally:
+        _inference_lock.release()
 
 
 @socketio.on('connect')

@@ -1,7 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 import numpy as np
-import tensorflow as tf
+
+try:
+    from tflite_runtime.interpreter import Interpreter
+except ImportError:  # local/dev fallback
+    from tensorflow.lite.python.interpreter import Interpreter
 
 
 class KeyPointClassifier(object):
@@ -10,8 +14,8 @@ class KeyPointClassifier(object):
         model_path='model/keypoint_classifier/keypoint_classifier.tflite',
         num_threads=1,
     ):
-        self.interpreter = tf.lite.Interpreter(model_path=model_path,
-                                               num_threads=num_threads)
+        self.interpreter = Interpreter(model_path=model_path,
+                                       num_threads=num_threads)
 
         self.interpreter.allocate_tensors()
         self.input_details = self.interpreter.get_input_details()
@@ -30,19 +34,9 @@ class KeyPointClassifier(object):
         output_details_tensor_index = self.output_details[0]['index']
 
         result = self.interpreter.get_tensor(output_details_tensor_index)
-        
+
         probabilities = np.squeeze(result)
-        
-        # Get the index of the highest confidence prediction
-        result_index = np.argmax(probabilities)
-        
-        # Get the confidence score of the predicted class
-        confidence_score = probabilities[result_index]
-        
-        
+        result_index = int(np.argmax(probabilities))
+        confidence_score = float(probabilities[result_index])
+
         return result_index, confidence_score
-
-
-        # result_index = np.argmax(np.squeeze(result))
-
-        # return result_index

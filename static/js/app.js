@@ -4,15 +4,19 @@ let _localStream = null;
 let _captureCanvas = null;
 let _captureIntervalId = null;
 let _hasProcessedFrame = false;
+let _modelsReady = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeSocketConnection();
     updateUIState();
+    pollModelStatus();
 });
 
 function initializeSocketConnection() {
+    // Prefer polling on Render — websocket upgrades are flaky behind some proxies
     socket = io({
-        transports: ['websocket', 'polling'],
+        transports: ['polling', 'websocket'],
+        upgrade: true,
     });
 
     socket.on('connect', () => {
@@ -34,16 +38,51 @@ function initializeSocketConnection() {
         }
     });
 
-    // Receive processed frames from server (base64 jpeg)
     socket.on('processed_frame', (data) => {
         if (!data || !data.image || !isStreaming) {
             return;
+        }
+        if (typeof data.models_ready === 'boolean') {
+            _modelsReady = data.models_ready;
+            updateModelStatusUI();
         }
         const videoFeed = document.getElementById('videoFeed');
         videoFeed.src = 'data:image/jpeg;base64,' + data.image;
         videoFeed.style.display = 'block';
         _hasProcessedFrame = true;
     });
+}
+
+async function pollModelStatus() {
+    try {
+        const res = await fetch('/health');
+        const data = await res.json();
+        _modelsReady = !!data.models_ready;
+        updateModelStatusUI(data);
+        if (!_modelsReady) {
+            setTimeout(pollModelStatus, 2000);
+        }
+    } catch (e) {
+        setTimeout(pollModelStatus, 3000);
+    }
+}
+
+function updateModelStatusUI(data) {
+    const el = document.getElementById('translationText');
+    if (!el) {
+        return;
+    }
+    if (data && data.models_error) {
+        el.textContent = 'Model error: ' + data.models_error;
+        return;
+    }
+    if (!_modelsReady) {
+        el.textContent = 'Loading sign models… (first boot can take ~30s)';
+        return;
+    }
+    if (!isStreaming) {
+        el.textContent = 'No sign detected';
+    }
 }
 
 function updateUIState() {
@@ -62,9 +101,10 @@ function updateUIState() {
         videoFeed.style.display = 'none';
         videoFeed.removeAttribute('src');
         _hasProcessedFrame = false;
-        document.getElementById('translationText').textContent = 'No sign detected';
+        if (_modelsReady) {
+            document.getElementById('translationText').textContent = 'No sign detected';
+        }
     } else if (!_hasProcessedFrame) {
-        // Keep showing local preview until the first processed frame arrives
         videoFeed.style.display = 'none';
     }
 }
@@ -103,13 +143,19 @@ async function startStream() {
             audio: false,
         });
 
-        // Show local preview immediately, then begin sending frames
         isStreaming = true;
         _hasProcessedFrame = false;
         updateUIState();
+        if (!_modelsReady) {
+            document.getElementById('translationText').textContent =
+                'Camera on — waiting for models to finish loading…';
+        }
 
         await startLocalCapture(_localStream);
-        await fetch('/start_stream', { method: 'POST' });
+        const res = await fetch('/start_stream', { method: 'POST' });
+        const data = await res.json();
+        _modelsReady = !!data.models_ready;
+        updateModelStatusUI(data);
     } catch (error) {
         stopLocalCapture();
         isStreaming = false;
@@ -141,7 +187,6 @@ async function startLocalCapture(stream) {
     localVideo.muted = true;
     localVideo.playsInline = true;
 
-    // Wait until the video is actually playing with valid dimensions
     await localVideo.play();
     await waitForVideoDimensions(localVideo);
 
@@ -157,7 +202,7 @@ async function startLocalCapture(stream) {
         clearInterval(_captureIntervalId);
     }
 
-    // Capture at ~10 FPS and send frames to the server
+    // ~6 FPS keeps Render CPU happier while still feeling realtime
     _captureIntervalId = setInterval(() => {
         if (!isStreaming || !localVideo.videoWidth) {
             return;
@@ -173,7 +218,7 @@ async function startLocalCapture(stream) {
             }
 
             ctx.drawImage(localVideo, 0, 0, _captureCanvas.width, _captureCanvas.height);
-            const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.7);
+            const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.65);
             const base64 = dataUrl.split(',')[1];
 
             if (socket && socket.connected && base64) {
@@ -182,7 +227,7 @@ async function startLocalCapture(stream) {
         } catch (e) {
             console.error('capture error', e);
         }
-    }, 100);
+    }, 160);
 }
 
 function waitForVideoDimensions(video, timeoutMs = 5000) {
