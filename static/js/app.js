@@ -3,7 +3,6 @@ let socket = null;
 let _localStream = null;
 let _captureCanvas = null;
 let _captureIntervalId = null;
-let _hasProcessedFrame = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeSocketConnection();
@@ -11,18 +10,36 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 function initializeSocketConnection() {
+    // Polling first is more reliable behind Render's proxy than opening
+    // with websocket (which can "connect" then silently drop large frames).
     socket = io({
-        transports: ['websocket', 'polling'],
+        transports: ['polling', 'websocket'],
+        upgrade: true,
+        reconnection: true,
+        timeout: 20000,
     });
 
     socket.on('connect', () => {
         updateConnectionStatus(true);
         console.log('Connected to server');
+        if (isStreaming) {
+            setCameraError('');
+        }
     });
 
     socket.on('disconnect', () => {
         updateConnectionStatus(false);
         console.log('Disconnected from server');
+        if (isStreaming) {
+            setCameraError('Camera is on. Reconnecting to the translator…');
+        }
+    });
+
+    socket.on('connect_error', (error) => {
+        console.error('Socket connection error:', error);
+        if (isStreaming) {
+            setCameraError('Camera is on, but the translator is not connected.');
+        }
     });
 
     socket.on('translation', (data) => {
@@ -33,21 +50,17 @@ function initializeSocketConnection() {
             }
         }
     });
+}
 
-    // Receive processed frames from server (base64 jpeg)
-    socket.on('processed_frame', (data) => {
-        if (!data || !data.image || !isStreaming) {
-            return;
-        }
-        const videoFeed = document.getElementById('videoFeed');
-        videoFeed.src = 'data:image/jpeg;base64,' + data.image;
-        videoFeed.style.display = 'block';
-        _hasProcessedFrame = true;
-    });
+function setCameraError(message) {
+    const el = document.getElementById('cameraError');
+    if (!el) {
+        return;
+    }
+    el.textContent = message || '';
 }
 
 function updateUIState() {
-    const videoFeed = document.getElementById('videoFeed');
     const localVideo = document.getElementById('localVideo');
     const startButton = document.getElementById('startButton');
     const stopButton = document.getElementById('stopButton');
@@ -59,13 +72,8 @@ function updateUIState() {
     stopButton.disabled = !isStreaming;
 
     if (!isStreaming) {
-        videoFeed.style.display = 'none';
-        videoFeed.removeAttribute('src');
-        _hasProcessedFrame = false;
         document.getElementById('translationText').textContent = 'No sign detected';
-    } else if (!_hasProcessedFrame) {
-        // Keep showing local preview until the first processed frame arrives
-        videoFeed.style.display = 'none';
+        setCameraError('');
     }
 }
 
@@ -88,33 +96,67 @@ function updateTranslation(text) {
     translationElement.style.animation = 'fadeIn 0.3s ease-in-out';
 }
 
-async function startStream() {
-    if (isStreaming) {
-        return;
-    }
-
-    try {
-        _localStream = await navigator.mediaDevices.getUserMedia({
+async function getCameraStream() {
+    const attempts = [
+        {
             video: {
                 facingMode: 'user',
                 width: { ideal: 640 },
                 height: { ideal: 480 },
             },
             audio: false,
-        });
+        },
+        { video: { facingMode: 'user' }, audio: false },
+        { video: true, audio: false },
+    ];
 
-        // Show local preview immediately, then begin sending frames
+    let lastError;
+    for (const constraints of attempts) {
+        try {
+            return await navigator.mediaDevices.getUserMedia(constraints);
+        } catch (error) {
+            lastError = error;
+        }
+    }
+
+    throw lastError || new Error('Could not open camera');
+}
+
+async function startStream() {
+    if (isStreaming) {
+        return;
+    }
+
+    setCameraError('');
+
+    try {
+        if (!window.isSecureContext) {
+            throw new Error('Camera requires HTTPS. Open the Render https:// URL.');
+        }
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            throw new Error('This browser does not allow camera access.');
+        }
+
+        _localStream = await getCameraStream();
+
+        // Keep the live webcam visible regardless of server/socket state.
         isStreaming = true;
-        _hasProcessedFrame = false;
         updateUIState();
 
-        await startLocalCapture(_localStream);
-        await fetch('/start_stream', { method: 'POST' });
+        try {
+            await startLocalCapture(_localStream);
+        } catch (previewError) {
+            console.warn('Camera preview warning:', previewError);
+        }
+
+        fetch('/start_stream', { method: 'POST' }).catch((error) => {
+            console.warn('start_stream failed:', error);
+        });
     } catch (error) {
         stopLocalCapture();
         isStreaming = false;
         updateUIState();
-        showError('Unable to access camera: ' + (error.message || error));
+        setCameraError('Unable to access camera: ' + (error.message || error));
         console.error('Error starting stream:', error);
     }
 }
@@ -124,11 +166,9 @@ async function stopStream() {
         return;
     }
 
-    try {
-        await fetch('/stop_stream', { method: 'POST' });
-    } catch (error) {
+    fetch('/stop_stream', { method: 'POST' }).catch((error) => {
         console.error('Error stopping stream:', error);
-    }
+    });
 
     stopLocalCapture();
     isStreaming = false;
@@ -139,17 +179,28 @@ async function startLocalCapture(stream) {
     const localVideo = document.getElementById('localVideo');
     localVideo.srcObject = stream;
     localVideo.muted = true;
+    localVideo.defaultMuted = true;
     localVideo.playsInline = true;
+    localVideo.setAttribute('playsinline', 'true');
+    localVideo.setAttribute('webkit-playsinline', 'true');
+    localVideo.setAttribute('muted', '');
+    localVideo.setAttribute('autoplay', '');
 
-    // Wait until the video is actually playing with valid dimensions
-    await localVideo.play();
-    await waitForVideoDimensions(localVideo);
+    try {
+        await localVideo.play();
+    } catch (error) {
+        console.warn('video.play() warning:', error);
+    }
+
+    try {
+        await waitForVideoDimensions(localVideo);
+    } catch (error) {
+        console.warn(error);
+    }
 
     if (!_captureCanvas) {
         _captureCanvas = document.createElement('canvas');
     }
-    _captureCanvas.width = localVideo.videoWidth || 640;
-    _captureCanvas.height = localVideo.videoHeight || 480;
 
     const ctx = _captureCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -157,23 +208,24 @@ async function startLocalCapture(stream) {
         clearInterval(_captureIntervalId);
     }
 
-    // Capture at ~10 FPS and send frames to the server
     _captureIntervalId = setInterval(() => {
         if (!isStreaming || !localVideo.videoWidth) {
             return;
         }
 
         try {
-            if (
-                _captureCanvas.width !== localVideo.videoWidth ||
-                _captureCanvas.height !== localVideo.videoHeight
-            ) {
-                _captureCanvas.width = localVideo.videoWidth;
-                _captureCanvas.height = localVideo.videoHeight;
+            const maxWidth = 480;
+            const scale = Math.min(1, maxWidth / localVideo.videoWidth);
+            const width = Math.max(1, Math.round(localVideo.videoWidth * scale));
+            const height = Math.max(1, Math.round(localVideo.videoHeight * scale));
+
+            if (_captureCanvas.width !== width || _captureCanvas.height !== height) {
+                _captureCanvas.width = width;
+                _captureCanvas.height = height;
             }
 
-            ctx.drawImage(localVideo, 0, 0, _captureCanvas.width, _captureCanvas.height);
-            const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.7);
+            ctx.drawImage(localVideo, 0, 0, width, height);
+            const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.6);
             const base64 = dataUrl.split(',')[1];
 
             if (socket && socket.connected && base64) {
@@ -182,10 +234,10 @@ async function startLocalCapture(stream) {
         } catch (e) {
             console.error('capture error', e);
         }
-    }, 100);
+    }, 200);
 }
 
-function waitForVideoDimensions(video, timeoutMs = 5000) {
+function waitForVideoDimensions(video, timeoutMs = 8000) {
     if (video.videoWidth > 0 && video.videoHeight > 0) {
         return Promise.resolve();
     }
@@ -241,15 +293,11 @@ function playAudio(audioUrl) {
     audio.onended = () => updateAudioStatus(false);
     audio.onerror = () => {
         updateAudioStatus(false);
-        showError('Failed to play audio');
+        console.error('Failed to play audio');
     };
 
     audio.play().catch((error) => {
         console.error('Audio playback error:', error);
         updateAudioStatus(false);
     });
-}
-
-function showError(message) {
-    console.error(message);
 }

@@ -26,7 +26,15 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'signspeak2025!'
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode='eventlet',
+    ping_timeout=60,
+    ping_interval=25,
+    max_http_buffer_size=5 * 1024 * 1024,
+)
+_frame_lock = Lock()
 
 # Global variables
 prev_text = ""
@@ -129,7 +137,8 @@ def process_frame(frame):
 # Flask routes
 @app.after_request
 def add_camera_headers(response):
-    response.headers['Permissions-Policy'] = 'camera=*, microphone=()'
+    response.headers['Permissions-Policy'] = 'camera=(self), microphone=()'
+    response.headers['Feature-Policy'] = "camera 'self'; microphone 'none'"
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin-allow-popups'
     return response
 
@@ -167,7 +176,10 @@ def stop_stream():
 
 @socketio.on('frame')
 def handle_frame(data):
-    """Receive a base64 JPEG frame from the client, process it, and return a processed JPEG."""
+    """Receive a client JPEG, run sign detection, and emit translation text only."""
+    if not _frame_lock.acquire(blocking=False):
+        return
+
     try:
         b64 = data.get('image') if isinstance(data, dict) else None
         if not b64:
@@ -180,18 +192,11 @@ def handle_frame(data):
             logger.warning('Failed to decode frame from client')
             return
 
-        processed = process_frame(frame)
-        if processed is None:
-            processed = frame
-
-        ret, buf = cv.imencode('.jpg', processed, [int(cv.IMWRITE_JPEG_QUALITY), 70])
-        if not ret:
-            return
-
-        out_b64 = base64.b64encode(buf).decode('utf-8')
-        emit('processed_frame', {'image': out_b64})
+        process_frame(frame)
     except Exception as e:
         logger.error(f"Error in frame handler: {str(e)}")
+    finally:
+        _frame_lock.release()
 
 # SocketIO events
 @socketio.on('connect')

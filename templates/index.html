@@ -25,7 +25,7 @@
                         <i class="fas fa-camera"></i>
                         <p>Camera is off</p>
                     </div>
-                    <video id="localVideo" playsinline muted autoplay></video>
+                    <video id="localVideo" playsinline webkit-playsinline muted autoplay></video>
                     <img id="videoFeed" src="" alt="">
                 </div>
                 <div class="controls">
@@ -36,6 +36,7 @@
                         <i class="fas fa-stop"></i> Stop Camera
                     </button>
                 </div>
+                <p id="cameraError" class="camera-error"></p>
             </div>
             
             <div class="info-panel">

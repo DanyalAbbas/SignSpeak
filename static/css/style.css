@@ -120,12 +120,18 @@ header h1 {
     transform: scaleX(-1);
     position: absolute;
     inset: 0;
+    z-index: 1;
 }
 
 #videoFeed {
-    position: absolute;
-    inset: 0;
-    z-index: 1;
+    display: none !important;
+}
+
+.camera-error {
+    color: var(--danger-color);
+    text-align: center;
+    min-height: 1.4em;
+    font-weight: 500;
 }
 
 /* Info Panel Styles */
