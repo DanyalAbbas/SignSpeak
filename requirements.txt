@@ -1,0 +1,11 @@
+Flask==3.0.2
+Flask-SocketIO==5.3.6
+Flask-Cors==4.0.0
+opencv-python==4.9.0.80
+opencv-contrib-python==4.9.0.80
+mediapipe
+tensorflow==2.15.0
+numpy==1.26.4
+gtts
+eventlet==0.35.2
+gunicorn[eventlet]
