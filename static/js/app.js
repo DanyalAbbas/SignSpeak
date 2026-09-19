@@ -3,6 +3,7 @@ let socket = null;
 let _localStream = null;
 let _captureCanvas = null;
 let _captureIntervalId = null;
+let _frameInFlight = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeSocketConnection();
@@ -50,6 +51,10 @@ function initializeSocketConnection() {
             }
         }
     });
+
+    socket.on('processed_hand', (data) => {
+        applyHandResult(data);
+    });
 }
 
 function setCameraError(message) {
@@ -62,12 +67,19 @@ function setCameraError(message) {
 
 function updateUIState() {
     const localVideo = document.getElementById('localVideo');
+    const handOverlay = document.getElementById('handOverlay');
     const startButton = document.getElementById('startButton');
     const stopButton = document.getElementById('stopButton');
     const overlay = document.getElementById('cameraOffOverlay');
 
     overlay.style.display = isStreaming ? 'none' : 'flex';
     localVideo.style.display = isStreaming ? 'block' : 'none';
+    if (handOverlay) {
+        handOverlay.style.display = isStreaming ? 'block' : 'none';
+        if (!isStreaming) {
+            clearHandOverlay();
+        }
+    }
     startButton.disabled = isStreaming;
     stopButton.disabled = !isStreaming;
 
@@ -209,7 +221,7 @@ async function startLocalCapture(stream) {
     }
 
     _captureIntervalId = setInterval(() => {
-        if (!isStreaming || !localVideo.videoWidth) {
+        if (!isStreaming || !localVideo.videoWidth || _frameInFlight) {
             return;
         }
 
@@ -227,14 +239,41 @@ async function startLocalCapture(stream) {
             ctx.drawImage(localVideo, 0, 0, width, height);
             const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.6);
             const base64 = dataUrl.split(',')[1];
-
-            if (socket && socket.connected && base64) {
-                socket.emit('frame', { image: base64 });
+            if (base64) {
+                sendFrameForTranslation(base64);
             }
         } catch (e) {
             console.error('capture error', e);
         }
-    }, 200);
+    }, 250);
+}
+
+async function sendFrameForTranslation(base64) {
+    _frameInFlight = true;
+    try {
+        const res = await fetch('/api/process_frame', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: base64 }),
+        });
+
+        if (res.status === 429) {
+            return;
+        }
+        if (!res.ok) {
+            throw new Error('process_frame HTTP ' + res.status);
+        }
+
+        const data = await res.json();
+        applyHandResult(data);
+    } catch (error) {
+        console.warn('HTTP frame failed, trying socket:', error);
+        if (socket && socket.connected) {
+            socket.emit('frame', { image: base64 });
+        }
+    } finally {
+        _frameInFlight = false;
+    }
 }
 
 function waitForVideoDimensions(video, timeoutMs = 8000) {
@@ -284,6 +323,103 @@ function stopLocalCapture() {
     if (_localStream) {
         _localStream.getTracks().forEach((track) => track.stop());
         _localStream = null;
+    }
+
+    _frameInFlight = false;
+    clearHandOverlay();
+}
+
+function applyHandResult(data) {
+    if (!isStreaming || !data) {
+        return;
+    }
+
+    if (data.translation && data.translation.text) {
+        updateTranslation(data.translation.text);
+        if (data.translation.audio) {
+            playAudio(data.translation.audio);
+        }
+    }
+
+    drawHandSkeleton(data.landmarks, data.translation && data.translation.text);
+}
+
+const HAND_CONNECTIONS = [
+    [2, 3], [3, 4],
+    [5, 6], [6, 7], [7, 8],
+    [9, 10], [10, 11], [11, 12],
+    [13, 14], [14, 15], [15, 16],
+    [17, 18], [18, 19], [19, 20],
+    [0, 1], [1, 2], [2, 5], [5, 9],
+    [9, 13], [13, 17], [17, 0],
+];
+
+function clearHandOverlay() {
+    const canvas = document.getElementById('handOverlay');
+    if (!canvas) {
+        return;
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawHandSkeleton(landmarks, label) {
+    const canvas = document.getElementById('handOverlay');
+    const video = document.getElementById('localVideo');
+    if (!canvas || !video) {
+        return;
+    }
+
+    const width = video.videoWidth || canvas.clientWidth || 640;
+    const height = video.videoHeight || canvas.clientHeight || 480;
+    if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+    }
+
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (!landmarks || landmarks.length < 21) {
+        return;
+    }
+
+    const points = landmarks.map(([x, y]) => [x * canvas.width, y * canvas.height]);
+
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    HAND_CONNECTIONS.forEach(([a, b]) => {
+        ctx.beginPath();
+        ctx.moveTo(points[a][0], points[a][1]);
+        ctx.lineTo(points[b][0], points[b][1]);
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    });
+
+    points.forEach((point, index) => {
+        const radius = [4, 8, 12, 16, 20].includes(index) ? 8 : 5;
+        ctx.beginPath();
+        ctx.arc(point[0], point[1], radius, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#000000';
+        ctx.stroke();
+    });
+
+    if (label) {
+        const [wx, wy] = points[0];
+        ctx.font = '20px sans-serif';
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = '#000000';
+        ctx.strokeText(label, wx + 10, wy - 10);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(label, wx + 10, wy - 10);
     }
 }
 

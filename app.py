@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'signspeak2025!'
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 CORS(app)
 socketio = SocketIO(
     app,
@@ -44,7 +45,7 @@ fps_calc = CvFpsCalc(buffer_len=10)
 # Load the hand tracking model
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
-    static_image_mode=False,
+    static_image_mode=True,
     max_num_hands=1,
     min_detection_confidence=0.7,
     min_tracking_confidence=0.5,
@@ -73,66 +74,65 @@ def text_to_speech_handler():
     except Exception as e:
         logger.error(f"Error in text_to_speech_handler: {str(e)}")
 
+def decode_client_frame(b64):
+    img_bytes = base64.b64decode(b64)
+    arr = np.frombuffer(img_bytes, dtype=np.uint8)
+    return cv.imdecode(arr, cv.IMREAD_COLOR)
+
+
 def process_frame(frame):
-    global prev_text, last_time
-    
+    """Run hand tracking + sign classification.
+
+    Returns {'label': str|None, 'landmarks': [[x, y], ...]|None}
+    Landmarks are normalized 0-1 in the original (unflipped) camera frame
+    so the browser overlay can share the video's CSS mirror.
+    """
     try:
-        # Flip the frame horizontally
         frame = cv.flip(frame, 1)
-        debug_image = copy.deepcopy(frame)
-        
-        # Convert to RGB for MediaPipe
         frame_rgb = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
         results = hands.process(frame_rgb)
-        
-        if results.multi_hand_landmarks is not None:
-            for hand_landmarks, handedness in zip(results.multi_hand_landmarks,
-                                                results.multi_handedness):
-                # Calculate bounding box
-                brect = calc_bounding_rect(debug_image, hand_landmarks)
-                
-                # Calculate landmarks
-                landmark_list = calc_landmark_list(debug_image, hand_landmarks)
-                
-                # Preprocess landmarks
-                pre_processed_landmark_list = pre_process_landmark(landmark_list)
-                
-                # Hand sign classification
-                hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                
-                if isinstance(hand_sign_id, tuple):
-                    if hand_sign_id[0] == 1 and hand_sign_id[1] < 0.9:
-                        continue
-                    if hand_sign_id[1] <= 0.6:
-                        continue
-                    hand_sign_id = hand_sign_id[0]
-                
-                # Draw landmarks and bounding box
-                debug_image = draw_bounding_rect(True, debug_image, brect)
-                debug_image = draw_landmarks(debug_image, landmark_list)
-                
-                # Get the translation text
-                translation = keypoint_classifier_labels[hand_sign_id]
-                debug_image = draw_info_text(debug_image, brect, handedness, translation)
-                
-                # Emit translation via WebSocket if it's different or enough time has passed
-                if translation != prev_text or (time.time() - last_time) >= 2:
-                    audio_path = f"/static/sounds/{translation}.mp3"
-                    socketio.emit('translation', {
-                        'text': translation,
-                        'audio': audio_path
-                    })
-                    prev_text = translation
-                    last_time = time.time()
-        
-        # Add FPS info (reuse one calculator across frames)
-        debug_image = draw_info(debug_image, fps_calc.get())
 
-        return debug_image
+        if results.multi_hand_landmarks is None:
+            return {'label': None, 'landmarks': None}
 
+        hand_landmarks = results.multi_hand_landmarks[0]
+        landmarks = [[1.0 - lm.x, lm.y] for lm in hand_landmarks.landmark]
+
+        landmark_list = calc_landmark_list(frame, hand_landmarks)
+        pre_processed_landmark_list = pre_process_landmark(landmark_list)
+        hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+
+        label = None
+        if isinstance(hand_sign_id, tuple):
+            sign_id, confidence = hand_sign_id
+            accepted = confidence > 0.6
+            if sign_id == 1 and confidence < 0.9:
+                accepted = False
+            if accepted and 0 <= sign_id < len(keypoint_classifier_labels):
+                label = keypoint_classifier_labels[sign_id]
+        elif 0 <= hand_sign_id < len(keypoint_classifier_labels):
+            label = keypoint_classifier_labels[hand_sign_id]
+
+        return {'label': label, 'landmarks': landmarks}
     except Exception as e:
         logger.error(f"Error in process_frame: {str(e)}")
-        return frame if frame is not None else None
+        return {'label': None, 'landmarks': None}
+
+
+def translation_payload(label):
+    global prev_text, last_time
+    if not label:
+        return None
+
+    speak = label != prev_text or (time.time() - last_time) >= 2
+    if speak:
+        prev_text = label
+        last_time = time.time()
+
+    return {
+        'text': label,
+        'audio': f'/static/sounds/{label}.mp3' if speak else None,
+    }
 
 # Flask routes
 @app.after_request
@@ -140,6 +140,9 @@ def add_camera_headers(response):
     response.headers['Permissions-Policy'] = 'camera=(self), microphone=()'
     response.headers['Feature-Policy'] = "camera 'self'; microphone 'none'"
     response.headers['Cross-Origin-Opener-Policy'] = 'same-origin-allow-popups'
+    if request.path.startswith('/static/'):
+        # eventlet/gunicorn often logs/sends 0-byte static files with sendfile
+        response.direct_passthrough = False
     return response
 
 @app.route('/')
@@ -174,9 +177,43 @@ def stop_stream():
     return jsonify({'status': 'success'})
 
 
+def run_classification(frame):
+    # MediaPipe is CPU-bound; run it in a real thread so eventlet is not frozen.
+    return eventlet.tpool.execute(process_frame, frame)
+
+
+@app.route('/api/process_frame', methods=['POST'])
+def api_process_frame():
+    """HTTP path for sign detection. Used because Socket.IO frame payloads
+    are often dropped in front of Render / Cloudflare."""
+    data = request.get_json(silent=True) or {}
+    b64 = data.get('image')
+    if not b64:
+        return jsonify({'error': 'missing image'}), 400
+
+    if not _frame_lock.acquire(blocking=False):
+        return jsonify({'busy': True}), 429
+
+    try:
+        frame = decode_client_frame(b64)
+        if frame is None:
+            return jsonify({'error': 'invalid image'}), 400
+
+        result = run_classification(frame) or {}
+        return jsonify({
+            'translation': translation_payload(result.get('label')),
+            'landmarks': result.get('landmarks'),
+        })
+    except Exception as e:
+        logger.error(f"api_process_frame failed: {e}")
+        return jsonify({'error': str(e)}), 500
+    finally:
+        _frame_lock.release()
+
+
 @socketio.on('frame')
 def handle_frame(data):
-    """Receive a client JPEG, run sign detection, and emit translation text only."""
+    """Fallback if the client still emits frames over Socket.IO."""
     if not _frame_lock.acquire(blocking=False):
         return
 
@@ -185,14 +222,19 @@ def handle_frame(data):
         if not b64:
             return
 
-        img_bytes = base64.b64decode(b64)
-        arr = np.frombuffer(img_bytes, dtype=np.uint8)
-        frame = cv.imdecode(arr, cv.IMREAD_COLOR)
+        frame = decode_client_frame(b64)
         if frame is None:
             logger.warning('Failed to decode frame from client')
             return
 
-        process_frame(frame)
+        result = run_classification(frame) or {}
+        payload = translation_payload(result.get('label'))
+        emit('processed_hand', {
+            'translation': payload,
+            'landmarks': result.get('landmarks'),
+        })
+        if payload:
+            emit('translation', payload)
     except Exception as e:
         logger.error(f"Error in frame handler: {str(e)}")
     finally:
