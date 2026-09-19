@@ -261,7 +261,8 @@ async function sendFrameForTranslation(base64) {
             return;
         }
         if (!res.ok) {
-            throw new Error('process_frame HTTP ' + res.status);
+            console.warn('process_frame HTTP ' + res.status);
+            return;
         }
 
         const data = await res.json();

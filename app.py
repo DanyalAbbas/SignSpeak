@@ -178,8 +178,8 @@ def stop_stream():
 
 
 def run_classification(frame):
-    # MediaPipe is CPU-bound; run it in a real thread so eventlet is not frozen.
-    return eventlet.tpool.execute(process_frame, frame)
+    # Call MediaPipe directly. eventlet 0.35 has no eventlet.tpool attribute.
+    return process_frame(frame)
 
 
 @app.route('/api/process_frame', methods=['POST'])
