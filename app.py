@@ -5,19 +5,19 @@ from flask import Flask, render_template, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import cv2 as cv
-import mediapipe as mp
 import numpy as np
 import csv
 import copy
 import itertools
-from model import KeyPointClassifier
 from utils import CvFpsCalc
 from gtts import gTTS
 import os
 import time
-from threading import Lock
 import logging
 import base64
+
+# Real OS threads — eventlet greenlets cannot run MediaPipe without freezing.
+_nt = eventlet.patcher.original('threading')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,24 +35,9 @@ socketio = SocketIO(
     ping_interval=25,
     max_http_buffer_size=5 * 1024 * 1024,
 )
-_frame_lock = Lock()
-
-# Global variables
 prev_text = ""
 last_time = time.time()
 fps_calc = CvFpsCalc(buffer_len=10)
-
-# Load the hand tracking model
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    static_image_mode=True,
-    max_num_hands=1,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.5,
-)
-
-# Load the keypoint classifier
-keypoint_classifier = KeyPointClassifier()
 
 # Read labels
 with open('model/keypoint_classifier/keypoint_classifier_label.csv',
@@ -80,7 +65,7 @@ def decode_client_frame(b64):
     return cv.imdecode(arr, cv.IMREAD_COLOR)
 
 
-def process_frame(frame):
+def process_frame(frame, hands, keypoint_classifier):
     """Run hand tracking + sign classification.
 
     Returns {'label': str|None, 'landmarks': [[x, y], ...]|None}
@@ -119,6 +104,76 @@ def process_frame(frame):
         return {'label': None, 'landmarks': None}
 
 
+class InferenceWorker:
+    """Runs MediaPipe on a native OS thread so eventlet is not blocked."""
+
+    def __init__(self):
+        self._lock = _nt.Lock()
+        self._cond = _nt.Condition(self._lock)
+        self._job = None
+        self.ready = False
+        self.error = None
+        self._thread = _nt.Thread(target=self._run, name='signspeak-infer', daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        try:
+            logger.info('Inference thread: loading MediaPipe + classifier')
+            import mediapipe as mp
+            from model import KeyPointClassifier
+
+            hands = mp.solutions.hands.Hands(
+                static_image_mode=True,
+                max_num_hands=1,
+                min_detection_confidence=0.7,
+                min_tracking_confidence=0.5,
+            )
+            classifier = KeyPointClassifier()
+            with self._lock:
+                self.ready = True
+                self._cond.notify_all()
+            logger.info('Inference thread: models ready')
+        except Exception as e:
+            logger.exception('Inference thread failed to load models')
+            with self._lock:
+                self.error = str(e)
+                self._cond.notify_all()
+            return
+
+        while True:
+            with self._lock:
+                while self._job is None or self._job.get('done'):
+                    self._cond.wait()
+                job = self._job
+                frame = job['frame']
+            result = process_frame(frame, hands, classifier)
+            with self._lock:
+                job['result'] = result
+                job['done'] = True
+                self._cond.notify_all()
+
+    def infer(self, frame, timeout=12):
+        if not self.ready:
+            return {'busy': True, 'models_ready': False, 'error': self.error}
+
+        job = {'frame': frame, 'result': None, 'done': False}
+        with self._lock:
+            if self._job is not None and not self._job.get('done'):
+                return {'busy': True, 'models_ready': True}
+            self._job = job
+            self._cond.notify_all()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                if job['done']:
+                    return job['result']
+            eventlet.sleep(0.03)
+
+        logger.warning('Inference timed out')
+        return None
+
+
 def translation_payload(label):
     global prev_text, last_time
     if not label:
@@ -155,6 +210,8 @@ def health():
     return jsonify({
         'status': 'ok',
         'service': 'SignSpeak',
+        'models_ready': inference_worker.ready,
+        'models_error': inference_worker.error,
         'timestamp': time.time()
     })
 
@@ -177,11 +234,6 @@ def stop_stream():
     return jsonify({'status': 'success'})
 
 
-def run_classification(frame):
-    # Call MediaPipe directly. eventlet 0.35 has no eventlet.tpool attribute.
-    return process_frame(frame)
-
-
 @app.route('/api/process_frame', methods=['POST'])
 def api_process_frame():
     """HTTP path for sign detection. Used because Socket.IO frame payloads
@@ -191,32 +243,33 @@ def api_process_frame():
     if not b64:
         return jsonify({'error': 'missing image'}), 400
 
-    if not _frame_lock.acquire(blocking=False):
-        return jsonify({'busy': True}), 429
-
     try:
         frame = decode_client_frame(b64)
         if frame is None:
             return jsonify({'error': 'invalid image'}), 400
 
-        result = run_classification(frame) or {}
+        result = inference_worker.infer(frame)
+        if result is None:
+            return jsonify({'error': 'timeout'}), 504
+        if result.get('busy'):
+            return jsonify({
+                'busy': True,
+                'models_ready': result.get('models_ready', False),
+            }), 429
+
         return jsonify({
             'translation': translation_payload(result.get('label')),
             'landmarks': result.get('landmarks'),
+            'models_ready': True,
         })
     except Exception as e:
-        logger.error(f"api_process_frame failed: {e}")
+        logger.exception('api_process_frame failed')
         return jsonify({'error': str(e)}), 500
-    finally:
-        _frame_lock.release()
 
 
 @socketio.on('frame')
 def handle_frame(data):
     """Fallback if the client still emits frames over Socket.IO."""
-    if not _frame_lock.acquire(blocking=False):
-        return
-
     try:
         b64 = data.get('image') if isinstance(data, dict) else None
         if not b64:
@@ -227,7 +280,9 @@ def handle_frame(data):
             logger.warning('Failed to decode frame from client')
             return
 
-        result = run_classification(frame) or {}
+        result = inference_worker.infer(frame)
+        if not result or result.get('busy'):
+            return
         payload = translation_payload(result.get('label'))
         emit('processed_hand', {
             'translation': payload,
@@ -237,8 +292,6 @@ def handle_frame(data):
             emit('translation', payload)
     except Exception as e:
         logger.error(f"Error in frame handler: {str(e)}")
-    finally:
-        _frame_lock.release()
 
 # SocketIO events
 @socketio.on('connect')
@@ -349,7 +402,8 @@ def draw_info(image, fps):
                1.0, (255, 255, 255), 2, cv.LINE_AA)
     return image
 
-# Run TTS generation at module level (for gunicorn)
+# Load MediaPipe/TF in a background OS thread so gunicorn can bind the port.
+inference_worker = InferenceWorker()
 text_to_speech_handler()
 
 if __name__ == '__main__':

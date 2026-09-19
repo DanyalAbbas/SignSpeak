@@ -250,15 +250,29 @@ async function startLocalCapture(stream) {
 
 async function sendFrameForTranslation(base64) {
     _frameInFlight = true;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
     try {
         const res = await fetch('/api/process_frame', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image: base64 }),
+            signal: controller.signal,
         });
 
         if (res.status === 429) {
+            try {
+                const data = await res.json();
+                if (data && data.models_ready === false) {
+                    setCameraError('Camera on — loading sign models (first boot can take ~30s)…');
+                }
+            } catch (e) {
+                /* ignore */
+            }
             return;
+        }
+        if (res.ok) {
+            setCameraError('');
         }
         if (!res.ok) {
             console.warn('process_frame HTTP ' + res.status);
@@ -268,11 +282,11 @@ async function sendFrameForTranslation(base64) {
         const data = await res.json();
         applyHandResult(data);
     } catch (error) {
-        console.warn('HTTP frame failed, trying socket:', error);
-        if (socket && socket.connected) {
-            socket.emit('frame', { image: base64 });
+        if (error.name !== 'AbortError') {
+            console.warn('HTTP frame failed:', error);
         }
     } finally {
+        clearTimeout(timeoutId);
         _frameInFlight = false;
     }
 }
