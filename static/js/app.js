@@ -4,21 +4,15 @@ let _localStream = null;
 let _captureCanvas = null;
 let _captureIntervalId = null;
 let _hasProcessedFrame = false;
-let _modelsReady = false;
-let _frameInFlight = false;
-
-const MAX_SEND_WIDTH = 480;
 
 document.addEventListener('DOMContentLoaded', () => {
     initializeSocketConnection();
     updateUIState();
-    pollModelStatus();
 });
 
 function initializeSocketConnection() {
     socket = io({
-        transports: ['polling', 'websocket'],
-        upgrade: true,
+        transports: ['websocket', 'polling'],
     });
 
     socket.on('connect', () => {
@@ -32,7 +26,7 @@ function initializeSocketConnection() {
     });
 
     socket.on('translation', (data) => {
-        if (data && data.text) {
+        if (data.text) {
             updateTranslation(data.text);
             if (data.audio) {
                 playAudio(data.audio);
@@ -40,73 +34,16 @@ function initializeSocketConnection() {
         }
     });
 
+    // Receive processed frames from server (base64 jpeg)
     socket.on('processed_frame', (data) => {
-        applyProcessedResult(data);
-    });
-
-    socket.on('connection_status', (data) => {
-        if (data && typeof data.models_ready === 'boolean') {
-            _modelsReady = data.models_ready;
-            updateModelStatusUI();
+        if (!data || !data.image || !isStreaming) {
+            return;
         }
-    });
-}
-
-function applyProcessedResult(data) {
-    if (!data || !isStreaming) {
-        return;
-    }
-
-    if (typeof data.models_ready === 'boolean') {
-        _modelsReady = data.models_ready;
-        updateModelStatusUI();
-    }
-
-    if (data.image) {
         const videoFeed = document.getElementById('videoFeed');
         videoFeed.src = 'data:image/jpeg;base64,' + data.image;
         videoFeed.style.display = 'block';
         _hasProcessedFrame = true;
-    }
-
-    if (data.translation && data.translation.text) {
-        updateTranslation(data.translation.text);
-        if (data.translation.audio) {
-            playAudio(data.translation.audio);
-        }
-    }
-}
-
-async function pollModelStatus() {
-    try {
-        const res = await fetch('/health');
-        const data = await res.json();
-        _modelsReady = !!data.models_ready;
-        updateModelStatusUI(data);
-        if (!_modelsReady) {
-            setTimeout(pollModelStatus, 2000);
-        }
-    } catch (e) {
-        setTimeout(pollModelStatus, 3000);
-    }
-}
-
-function updateModelStatusUI(data) {
-    const el = document.getElementById('translationText');
-    if (!el) {
-        return;
-    }
-    if (data && data.models_error) {
-        el.textContent = 'Model error: ' + data.models_error;
-        return;
-    }
-    if (!_modelsReady) {
-        el.textContent = 'Loading sign models… (first boot can take ~30s)';
-        return;
-    }
-    if (!isStreaming) {
-        el.textContent = 'No sign detected';
-    }
+    });
 }
 
 function updateUIState() {
@@ -125,10 +62,9 @@ function updateUIState() {
         videoFeed.style.display = 'none';
         videoFeed.removeAttribute('src');
         _hasProcessedFrame = false;
-        if (_modelsReady) {
-            document.getElementById('translationText').textContent = 'No sign detected';
-        }
+        document.getElementById('translationText').textContent = 'No sign detected';
     } else if (!_hasProcessedFrame) {
+        // Keep showing local preview until the first processed frame arrives
         videoFeed.style.display = 'none';
     }
 }
@@ -146,6 +82,7 @@ function updateAudioStatus(active) {
 function updateTranslation(text) {
     const translationElement = document.getElementById('translationText');
     translationElement.textContent = text;
+
     translationElement.style.animation = 'none';
     translationElement.offsetHeight;
     translationElement.style.animation = 'fadeIn 0.3s ease-in-out';
@@ -160,25 +97,19 @@ async function startStream() {
         _localStream = await navigator.mediaDevices.getUserMedia({
             video: {
                 facingMode: 'user',
-                width: { ideal: 640, max: 640 },
-                height: { ideal: 480, max: 480 },
+                width: { ideal: 640 },
+                height: { ideal: 480 },
             },
             audio: false,
         });
 
+        // Show local preview immediately, then begin sending frames
         isStreaming = true;
         _hasProcessedFrame = false;
         updateUIState();
-        if (!_modelsReady) {
-            document.getElementById('translationText').textContent =
-                'Camera on — waiting for models to finish loading…';
-        }
 
         await startLocalCapture(_localStream);
-        const res = await fetch('/start_stream', { method: 'POST' });
-        const data = await res.json();
-        _modelsReady = !!data.models_ready;
-        updateModelStatusUI(data);
+        await fetch('/start_stream', { method: 'POST' });
     } catch (error) {
         stopLocalCapture();
         isStreaming = false;
@@ -210,12 +141,15 @@ async function startLocalCapture(stream) {
     localVideo.muted = true;
     localVideo.playsInline = true;
 
+    // Wait until the video is actually playing with valid dimensions
     await localVideo.play();
     await waitForVideoDimensions(localVideo);
 
     if (!_captureCanvas) {
         _captureCanvas = document.createElement('canvas');
     }
+    _captureCanvas.width = localVideo.videoWidth || 640;
+    _captureCanvas.height = localVideo.videoHeight || 480;
 
     const ctx = _captureCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -223,75 +157,32 @@ async function startLocalCapture(stream) {
         clearInterval(_captureIntervalId);
     }
 
-    // HTTP processing is more reliable behind Cloudflare than Socket.IO payloads
+    // Capture at ~10 FPS and send frames to the server
     _captureIntervalId = setInterval(() => {
-        captureAndSendFrame(localVideo, ctx);
-    }, 200);
-}
-
-function captureAndSendFrame(localVideo, ctx) {
-    if (!isStreaming || !localVideo.videoWidth || _frameInFlight) {
-        return;
-    }
-
-    try {
-        const srcW = localVideo.videoWidth;
-        const srcH = localVideo.videoHeight;
-        const scale = Math.min(1, MAX_SEND_WIDTH / srcW);
-        const w = Math.max(1, Math.round(srcW * scale));
-        const h = Math.max(1, Math.round(srcH * scale));
-
-        if (_captureCanvas.width !== w || _captureCanvas.height !== h) {
-            _captureCanvas.width = w;
-            _captureCanvas.height = h;
-        }
-
-        ctx.drawImage(localVideo, 0, 0, w, h);
-        const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.6);
-        const base64 = dataUrl.split(',')[1];
-        if (!base64) {
+        if (!isStreaming || !localVideo.videoWidth) {
             return;
         }
 
-        // Prefer HTTP — works through Cloudflare; Socket.IO as secondary
-        sendFrameOverHttp(base64);
-    } catch (e) {
-        console.error('capture error', e);
-    }
-}
+        try {
+            if (
+                _captureCanvas.width !== localVideo.videoWidth ||
+                _captureCanvas.height !== localVideo.videoHeight
+            ) {
+                _captureCanvas.width = localVideo.videoWidth;
+                _captureCanvas.height = localVideo.videoHeight;
+            }
 
-async function sendFrameOverHttp(base64) {
-    _frameInFlight = true;
-    try {
-        const res = await fetch('/api/process_frame', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ image: base64 }),
-        });
+            ctx.drawImage(localVideo, 0, 0, _captureCanvas.width, _captureCanvas.height);
+            const dataUrl = _captureCanvas.toDataURL('image/jpeg', 0.7);
+            const base64 = dataUrl.split(',')[1];
 
-        if (res.status === 429) {
-            return;
-        }
-
-        if (!res.ok) {
-            console.warn('process_frame failed', res.status);
-            // Fallback to socket if HTTP path errors
-            if (socket && socket.connected) {
+            if (socket && socket.connected && base64) {
                 socket.emit('frame', { image: base64 });
             }
-            return;
+        } catch (e) {
+            console.error('capture error', e);
         }
-
-        const data = await res.json();
-        applyProcessedResult(data);
-    } catch (e) {
-        console.error('HTTP frame error', e);
-        if (socket && socket.connected) {
-            socket.emit('frame', { image: base64 });
-        }
-    } finally {
-        _frameInFlight = false;
-    }
+    }, 100);
 }
 
 function waitForVideoDimensions(video, timeoutMs = 5000) {
@@ -342,8 +233,6 @@ function stopLocalCapture() {
         _localStream.getTracks().forEach((track) => track.stop());
         _localStream = null;
     }
-
-    _frameInFlight = false;
 }
 
 function playAudio(audioUrl) {
